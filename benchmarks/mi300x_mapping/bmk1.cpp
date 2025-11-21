@@ -18,7 +18,7 @@ inline void gpuAssert(hipError_t code, const char *file, int line, bool abort=tr
     }
 }
 
-constexpr int THREADS_PER_BLOCK = 8;
+constexpr int THREADS_PER_BLOCK = 8; // each thread loads 16B, so 8*16B=128B=1 cache line
 constexpr int BLOCKS_NUM = 8;
 constexpr int TOTAL_THREADS = THREADS_PER_BLOCK * BLOCKS_NUM;
 
