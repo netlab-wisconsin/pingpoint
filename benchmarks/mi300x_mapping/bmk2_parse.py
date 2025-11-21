@@ -2,8 +2,8 @@ import re
 from collections import defaultdict
 
 # Input/output
-input_file = 'result/bmk2_pg4.log' # Change this to your actual file name
-output_file = 'result/bmk2_pg4.csv' # Change this to your actual file name
+input_file = 'results/bmk2_pg4.log' # Change this to your actual file name
+output_file = 'results/bmk2_pg4.csv' # Change this to your actual file name
 
 # Dictionary to store cycles: key=(pid,cid,p,pcid) → cycles
 data = {}
