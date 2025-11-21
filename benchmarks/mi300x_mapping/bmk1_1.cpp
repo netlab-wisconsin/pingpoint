@@ -1,4 +1,5 @@
 // determination of home node
+// cache line access in shuffled order
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,7 +23,7 @@ constexpr int THREADS_PER_BLOCK = 8; // each thread loads 16B, so 8*16B=128B=1 c
 constexpr int BLOCKS_NUM = 8;
 constexpr int TOTAL_THREADS = THREADS_PER_BLOCK * BLOCKS_NUM;
 
-__global__ void k(char *data, size_t size) {
+__global__ void k(char *data, size_t size, int *access_order) {
     int bid = blockIdx.x;
     int tid = threadIdx.x;
     int uid = bid * blockDim.x + tid;
@@ -46,7 +47,21 @@ __global__ void k(char *data, size_t size) {
     // latency measurement
     uint32_t start = 0, end = 0;
 
-    for (int i = 0; i < iter; i++) {
+    // pre-load boundaries to warm up cache / tlb
+    for (int i = 0; i < iter; i+=32) {
+        asm volatile(
+            "flat_load_dwordx4 %0, %1\n\t"
+            "s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t"
+            : "=v"(tmp)
+            : "v"(&data_u4[i * THREADS_PER_BLOCK + tid])
+            : "memory"
+        );
+    }
+
+    // access in shuffled order
+    for (int _i = 0; _i < iter; _i++) {
+        int i = access_order[_i];
+
         for (size_t b = 0; b < BLOCKS_NUM; b++) {
             // each thread block access same data chunk in turn
             if (bid == b) {
@@ -82,7 +97,7 @@ __global__ void k(char *data, size_t size) {
 // observation: within a page, each half-page is mapped to a hbm stack
 int main() {
     size_t n_pages = 4; // you can change
-    printf("bmk1: allocate %zu pages. on cache line granularity, compare load latency from different xcc\n", n_pages);
+    printf("bmk1_1: allocate %zu pages. on cache line granularity, compare load latency from different xcc\n", n_pages);
 
     size_t data_size = (4 * 1024 * n_pages); // 4KB page size, n_pages pages
     vector<char> h_data(data_size, 0);
@@ -98,9 +113,19 @@ int main() {
 
     gpuErrchk(hipMemcpy(d_data, h_data.data(), data_size, hipMemcpyHostToDevice));
 
+    // create shuffled access order
+    int iter = data_size / sizeof(uint4) / THREADS_PER_BLOCK;
+    int access_order[iter];
+    for (int i = 0; i < iter; i++) access_order[i] = i;
+    for (int i = 0; i < iter; i++) std::swap(access_order[i], access_order[rand() % iter]);
+    int *d_access_order;
+    gpuErrchk(hipMalloc((void**)&d_access_order, sizeof(int) * iter));
+    gpuErrchk(hipMemcpy(d_access_order, access_order, sizeof(int) * iter, hipMemcpyHostToDevice));
+
     void *kernel_args[] = {
         (void*)&d_data,
-        (void*)&data_size
+        (void*)&data_size,
+        (void*)&d_access_order
     };
 
     gpuErrchk(hipLaunchCooperativeKernel(
@@ -111,6 +136,7 @@ int main() {
     gpuErrchk(hipDeviceSynchronize());
 
     gpuErrchk(hipFree(d_data));
+    gpuErrchk(hipFree(d_access_order));
 
     return 0;
 }
