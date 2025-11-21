@@ -5,7 +5,7 @@ HIPOPTS = --amdgpu-target=gfx942
 HIP_PATH = /opt/rocm-7.1.0
 CC := $(HIP_PATH)/bin/hipcc
 
-BENCHMARKS := bmk1 bmk1_1 bmk5
+BENCHMARKS := bmk1 bmk1_1 bmk2 bmk5
 
 all: $(BENCHMARKS)
 
