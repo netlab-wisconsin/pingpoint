@@ -94,7 +94,7 @@ __global__ void k(void *data, size_t size, uint32_t **d_cycles, int *d_home) {
         printf("working set per xcd: %.2f MB\n", (n_chunks * sizeof(uint4) / XCDS_NUM) / (1024.0 * 1024.0));
     }
 
-    uint4 tmp;
+    // uint4 tmp;
     
     // warm up
     for (size_t i = 0; i < n_iter; i++) {
@@ -105,11 +105,13 @@ __global__ void k(void *data, size_t size, uint32_t **d_cycles, int *d_home) {
             #endif
         }
         asm volatile(
-            "flat_load_dwordx4 %0, %1\n\t" // might want l1 bypass
+            // "flat_load_dwordx4 %0, %1\n\t" // might want l1 bypass
+            "flat_load_dwordx4 v[0:3], %0\n\t" // might want l1 bypass
             "s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t"
-            : "=v"(tmp)
+            // : "=v"(tmp)
+            :
             : "v"(&data_u4[index])
-            : "memory"
+            : "memory", "v0", "v1", "v2", "v3"
         );
     }
     global_barrier();
@@ -126,11 +128,13 @@ __global__ void k(void *data, size_t size, uint32_t **d_cycles, int *d_home) {
         }
         start = __builtin_readcyclecounter();
         asm volatile(
-            "flat_load_dwordx4 %0, %1\n\t" // might want l1 bypass
+            // "flat_load_dwordx4 %0, %1\n\t" // might want l1 bypass
+            "flat_load_dwordx4 v[0:3], %0\n\t" // might want l1 bypass
             "s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t"
-            : "=v"(tmp)
+            // : "=v"(tmp)
+            :
             : "v"(&data_u4[index])
-            : "memory"
+            : "memory", "v0", "v1", "v2", "v3"
         );
         end = __builtin_readcyclecounter();
         cycles[i] = end - start;
@@ -143,36 +147,39 @@ __global__ void k(void *data, size_t size, uint32_t **d_cycles, int *d_home) {
     if (tid == 0) {
         for (size_t i = 0; i < n_iter; i++) {
             d_cycles[xcc_id][i * n_tbs_in_xcd + tbid_in_xcd] = cycles[i];
-            // #if DEBUG
+            #if DEBUG
             printf("iter %zu tbid_in_xcd %d (bid %d, xcd %d): %u cycles\n", i, tbid_in_xcd, bid, xcc_id, cycles[i]);
-            // #endif
+            #endif
         }
     }
     global_barrier(); // sync global memory writes
 
-    // get winner!
-    if (xcc_id == 0 && tid == 0) {
-        for (size_t i = 0; i < n_iter; i++) {
-            uint32_t min_cycles = 0xFFFFFFFF;
-            int min_xcc = -1;
-            for (int xcc = 0; xcc < XCDS_NUM; xcc++) {
-                uint32_t c = d_cycles[xcc][i * n_tbs_in_xcd + tbid_in_xcd];
-                if (c < min_cycles) {
-                    min_cycles = c;
-                    min_xcc = xcc;
-                }
-            }
-            d_home[i * n_tbs_in_xcd + tbid_in_xcd] = min_xcc;
-        }
-    }
-    global_barrier(); // sync global memory writes
+    // // get winner!
+    // if (bid == 0 && tid == 0) {
+    //     #pragma unroll 1
+    //     for (size_t i = 0; i < n_iter; i++) {
+    //         uint32_t min_cycles = 0xFFFFFFFF;
+    //         int min_xcc = -1;
+    //         #pragma unroll 1
+    //         for (int xcc = 0; xcc < XCDS_NUM; xcc++) {
+    //             uint32_t c = d_cycles[xcc][i * n_tbs_in_xcd + tbid_in_xcd];
+    //             // printf("iter %zu tbid_in_xcd %d xcc %d: %u cycles\n", i, tbid_in_xcd, xcc, c);
+    //             if (c < min_cycles) {
+    //                 // printf("  new min found: xcc %d with %u cycles (prev %u)\n", xcc, c, min_cycles);
+    //                 min_cycles = c;
+    //                 min_xcc = xcc;
+    //             }
+    //         }
+    //         d_home[i * n_tbs_in_xcd + tbid_in_xcd] = min_xcc;
+    //     }
+    // }
+    // global_barrier(); // sync global memory writes
     
-    if (bid == 0 && tid == 0) {
-        for (size_t i = 0; i < size / (4 * 1024); i++) {
-            printf("4KB chunk[%zu]: home xcd %d\n", i, d_home[i]);
-        }
-    }
-
+    // if (bid == 0 && tid == 0) {
+    //     for (size_t i = 0; i < size / (4 * 1024); i++) {
+    //         printf("4KB chunk[%zu]: home xcd %d\n", i, d_home[i]);
+    //     }
+    // }
 }
 
 int main() {
@@ -239,6 +246,28 @@ int main() {
         (void*)d_data, data_size, d_cycles, d_home
     );
     gpuErrchk(hipDeviceSynchronize());
+
+    /* retrieve and process results */
+    uint32_t h_cycles[XCDS_NUM][data_size / (4 * 1024)];;
+    for (int x = 0; x < XCDS_NUM; x++) {
+        gpuErrchk(hipMemcpy(&h_cycles[x][0], d_cycles[x], sizeof(uint32_t) * (data_size / (4 * 1024)), hipMemcpyDeviceToHost));
+    }
+    
+    int h_home[data_size / (4 * 1024)];
+    for (size_t i = 0; i < data_size / (4 * 1024); i++) {
+        uint32_t min_cycles = 0xFFFFFFFF;
+        int min_xcc = -1;
+        for (int xcc = 0; xcc < XCDS_NUM; xcc++) {
+            uint32_t c = h_cycles[xcc][i];
+            if (c < min_cycles) {
+                min_cycles = c;
+                min_xcc = xcc;
+            }
+        }
+        h_home[i] = min_xcc;
+        printf("4KB chunk[%zu]: home xcd %d\n", i, h_home[i]);
+    }
+
 
     /* cleanup */
 
