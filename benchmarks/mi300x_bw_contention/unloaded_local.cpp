@@ -12,6 +12,8 @@
 #define TPX 1
 #endif
 
+#define XCDS_NUM 8
+
 using namespace std;
 
 // GPU error check
@@ -26,8 +28,34 @@ inline void gpuAssert(hipError_t code, const char *file, int line, bool abort=tr
 constexpr int PAGE_SIZE = (2 * 1024 * 1024); // 2MB huge page
 constexpr int CHUNK_SIZE = (4 * 1024); // 4KB chunk size
 
-#define XCDS_NUM 8
+#define D_LOG_TID_0 0
 #define DEBUG 0
+
+// per-xcd barrier
+__device__ int d_xcd_barrier_count[XCDS_NUM] = {0};
+// __device__ int d_xcd_barrier_sense[XCDS_NUM] = {0};
+__device__ volatile int d_xcd_barrier_sense[XCDS_NUM] = {0}; // avoid spin
+
+__device__ __forceinline__
+void xcd_barrier(int xcd_id, int blocks_per_xcd)
+{
+    __shared__ int local_sense;  // one per block
+    if (threadIdx.x == 0) {
+        int old_sense = d_xcd_barrier_sense[xcd_id];
+        local_sense   = !old_sense;
+
+        int arrived = atomicAdd(&d_xcd_barrier_count[xcd_id], 1);
+        if (arrived == blocks_per_xcd - 1) {
+            d_xcd_barrier_count[xcd_id] = 0;
+            __threadfence(); // Make global writes visible on this XCD before release
+            d_xcd_barrier_sense[xcd_id] = local_sense;
+        }
+    }
+    __syncthreads(); // Make sure all threads in the block see local_sense
+    while (d_xcd_barrier_sense[xcd_id] != local_sense) {} // Spin until last block flips global sense
+    __syncthreads(); // all threads in this block observe sense change before proceeding
+}
+
 
 __global__ void k(uint64_t **xcd_chunks, size_t *xcd_chunks_size, uint32_t **cycles) {
     int bid = blockIdx.x;
@@ -54,7 +82,26 @@ __global__ void k(uint64_t **xcd_chunks, size_t *xcd_chunks_size, uint32_t **cyc
         #endif
     }
 
-    uint32_t total_cycles = 0, start = 0, end = 0;
+    // warmup
+    // only 1 thread per xcd warms up entirely
+    if (tbid_in_xcd == 0 && tid == 0) {
+        for (size_t i = 0; i < xcd_chunks_size[xcc_id]; i++) {
+            uint64_t ptr = xcd_chunks[xcc_id][i];
+            uint4 *data_ptr = (uint4*)ptr;
+            for (size_t offset = 0; offset < (CHUNK_SIZE / sizeof(uint4)); offset++) {
+                asm volatile (
+                    "flat_load_dwordx4 v[0:3], %0\n\t"
+                    "s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t"
+                    :
+                    : "v"(&data_ptr[offset])
+                    : "memory", "v0", "v1", "v2", "v3"
+                );
+            }
+        }
+    }
+    xcd_barrier(xcc_id, n_tbs_in_xcd); // sync xcd
+
+    // measurement
     size_t n_iter = xcd_chunks_size[xcc_id] / n_tbs_in_xcd;
     if (tid == 0) {
         #if DEBUG
@@ -62,41 +109,52 @@ __global__ void k(uint64_t **xcd_chunks, size_t *xcd_chunks_size, uint32_t **cyc
         #endif
     }
 
-    // warmup
-    for (size_t iter = 0; iter < n_iter; iter++) {
-        size_t chunk_idx = tbid_in_xcd + iter * n_tbs_in_xcd;
-        uint64_t ptr = xcd_chunks[xcc_id][chunk_idx];
-        uint4 *data_ptr = (uint4*)ptr;
-    
-        asm volatile (
-            "flat_load_dwordx4 v[0:3], %0\n\t"
-            "s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t"
-            :
-            : "v"(&data_ptr[tid])
-            : "memory", "v0", "v1", "v2", "v3"
-        );
-    }
+    // start timing
+    uint32_t start = 0;
+    start = __builtin_readcyclecounter();
+    asm volatile("s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t"); // per ISA manual, need waitcnt after S_MEMTIME
 
-    // measurement
     for (size_t iter = 0; iter < n_iter; iter++) {
         size_t chunk_idx = tbid_in_xcd + iter * n_tbs_in_xcd;
         uint64_t ptr = xcd_chunks[xcc_id][chunk_idx];
         uint4 *data_ptr = (uint4*)ptr;
         
-        start = __builtin_readcyclecounter();
+        // see tid 0 cycle counts for debug
+        #if D_LOG_TID_0
+        uint32_t log_start = 0, log_end = 0;
+        if (tid == 0) {
+            log_start = __builtin_readcyclecounter();
+            asm volatile("s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t"); // per ISA manual, need waitcnt after S_MEMTIME
+        }
+        #endif
+        
         asm volatile (
             "flat_load_dwordx4 v[0:3], %0\n\t"
-            "s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t"
+            // "s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t"
             :
             : "v"(&data_ptr[tid])
             : "memory", "v0", "v1", "v2", "v3"
         );
-        end = __builtin_readcyclecounter();
-        total_cycles += (end - start);
+
+        // see tid 0 cycle counts for debug
+        #if D_LOG_TID_0
+        if (tid == 0) {
+            asm volatile("s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t"); // ensure load done before reading cycle counter
+            log_end = __builtin_readcyclecounter();
+            asm volatile("s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t"); // per ISA manual, need waitcnt after S_MEMTIME
+            printf("(debug) iter %zu tbid_in_xcd %d (bid %d, xcd %d): %u cycles\n", iter, tbid_in_xcd, bid, xcc_id, (log_end - log_start));
+        }
+        #endif
     }
-    
+    asm volatile("s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t");
+
+    // stop timing
+    uint32_t stop = 0;
+    stop = __builtin_readcyclecounter();
+    asm volatile("s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t"); // per ISA manual, need waitcnt after S_MEMTIME
+
     if (tid == 0) {
-        cycles[xcc_id][tbid_in_xcd] = total_cycles;
+        cycles[xcc_id][tbid_in_xcd] = stop - start;
     }
 }
 
