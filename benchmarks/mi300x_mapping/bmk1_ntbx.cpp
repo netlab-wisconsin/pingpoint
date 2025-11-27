@@ -6,10 +6,14 @@
 #include <vector>
 #include <hip/hip_runtime.h>
 
-#include "bmk1.h"
+#include "bmk1_ntbx.h"
 
 #ifndef TPX
-#define TPX 1
+#define TPX 1 // thread blocks per xcd
+#endif
+
+#ifndef XCDS_NUM
+#define XCDS_NUM 8
 #endif
 
 // GPU error check
@@ -28,11 +32,6 @@ constexpr int WARPS_PER_BLOCK = 4;
 constexpr int PAGE_SIZE = (2 * 1024 * 1024); // 2MB huge page
 constexpr int CHUNK_SIZE = (4 * 1024); // 4KB chunk size
 
-struct chunk4KB {
-    char data[CHUNK_SIZE];
-};
-
-#define XCDS_NUM 8
 #define DEBUG 0
 
 int main() {
@@ -42,7 +41,7 @@ int main() {
     const int n_blocks = (TPX * XCDS_NUM);
     const int n_threads_per_block = (WARPS_PER_BLOCK * THREADS_PER_WARP);
     const int total_threads = (n_blocks * n_threads_per_block);
-    printf("n_blocks: %d, n_blocks_per_xcd: %d, n_warps_per_block: %d, n_threads_per_warp: %d\n", n_blocks, TPX, WARPS_PER_BLOCK, THREADS_PER_WARP);
+    printf("n_xcds: %d, n_blocks: %d, n_blocks_per_xcd: %d, n_warps_per_block: %d, n_threads_per_warp: %d\n", XCDS_NUM, n_blocks, TPX, WARPS_PER_BLOCK, THREADS_PER_WARP);
 
     const int n_pages = 128; // := 256 MB to fill up LLC
     const size_t data_size = (n_pages * PAGE_SIZE); 

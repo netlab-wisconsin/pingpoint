@@ -1,0 +1,71 @@
+BASE_DIR := $(shell pwd)
+BIN_DIR  := $(BASE_DIR)/bin
+HIP_PATH := /opt/rocm-7.1.0
+CC       := $(HIP_PATH)/bin/hipcc
+HIPOPTS  := --amdgpu-target=gfx942
+
+XCDS_MAX := 8
+TPX_MAX  := 36
+
+.PHONY: all clean
+
+all:
+	@for x in $$(seq 1 $(XCDS_MAX)); do \
+		for t in $$(seq 1 $(TPX_MAX)); do \
+			cmd="$(CC) $(HIPOPTS) -DXCDS=$${x} -DTPX=$${t} local.cpp -o $(BIN_DIR)/local_xcds_$${x}_tpx_$${t}"; \
+			echo "$$cmd"; \
+			$$cmd || exit 1; \
+		done; \
+	done
+
+local_xcds_1_tpx_%:
+	@t=$*; \
+	 out=$(BIN_DIR)/$@; \
+	 cmd="$(CC) $(HIPOPTS) -DXCDS=1 -DTPX=$$t local.cpp -o $$out"; \
+	 echo "$$cmd"; $$cmd
+
+local_xcds_2_tpx_%:
+	@t=$*; \
+	 out=$(BIN_DIR)/$@; \
+	 cmd="$(CC) $(HIPOPTS) -DXCDS=2 -DTPX=$$t local.cpp -o $$out"; \
+	 echo "$$cmd"; $$cmd
+
+local_xcds_3_tpx_%:
+	@t=$*; \
+	 out=$(BIN_DIR)/$@; \
+	 cmd="$(CC) $(HIPOPTS) -DXCDS=3 -DTPX=$$t local.cpp -o $$out"; \
+	 echo "$$cmd"; $$cmd
+
+local_xcds_4_tpx_%:
+	@t=$*; \
+	 out=$(BIN_DIR)/$@; \
+	 cmd="$(CC) $(HIPOPTS) -DXCDS=4 -DTPX=$$t local.cpp -o $$out"; \
+	 echo "$$cmd"; $$cmd
+
+local_xcds_5_tpx_%:
+	@t=$*; \
+	 out=$(BIN_DIR)/$@; \
+	 cmd="$(CC) $(HIPOPTS) -DXCDS=5 -DTPX=$$t local.cpp -o $$out"; \
+	 echo "$$cmd"; $$cmd
+
+local_xcds_6_tpx_%:
+	@t=$*; \
+	 out=$(BIN_DIR)/$@; \
+	 cmd="$(CC) $(HIPOPTS) -DXCDS=6 -DTPX=$$t local.cpp -o $$out"; \
+	 echo "$$cmd"; $$cmd
+
+local_xcds_7_tpx_%:
+	@t=$*; \
+	 out=$(BIN_DIR)/$@; \
+	 cmd="$(CC) $(HIPOPTS) -DXCDS=7 -DTPX=$$t local.cpp -o $$out"; \
+	 echo "$$cmd"; $$cmd
+
+local_xcds_8_tpx_%:
+	@t=$*; \
+	 out=$(BIN_DIR)/$@; \
+	 cmd="$(CC) $(HIPOPTS) -DXCDS=8 -DTPX=$$t local.cpp -o $$out"; \
+	 echo "$$cmd"; $$cmd
+
+clean:
+	@echo "rm -f $(BIN_DIR)/local_xcds_*_tpx_*"
+	rm -f $(BIN_DIR)/local_xcds_*_tpx_*

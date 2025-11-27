@@ -6,13 +6,15 @@
 #include <vector>
 #include <hip/hip_runtime.h>
 
-#include "bmk1.h"
+#include "../mi300x_mapping/bmk1_ntbx.h"
 
 #ifndef TPX
 #define TPX 1
 #endif
 
+#ifndef XCDS_NUM
 #define XCDS_NUM 8
+#endif
 
 using namespace std;
 
@@ -169,7 +171,7 @@ int main() {
     const int n_blocks = (TPX * XCDS_NUM);
     const int n_threads_per_block = (n_warps_per_block * n_threads_per_warp);
     const int total_threads = (n_blocks * n_threads_per_block);
-    printf("n_blocks: %d, n_blocks_per_xcd: %d, n_warps_per_block: %d, n_threads_per_warp: %d\n", n_blocks, TPX, n_warps_per_block, n_threads_per_warp);
+    printf("n_xcds: %d, n_blocks: %d, n_blocks_per_xcd: %d, n_warps_per_block: %d, n_threads_per_warp: %d\n", XCDS_NUM, n_blocks, TPX, n_warps_per_block, n_threads_per_warp);
 
     /* allocate data */
 
