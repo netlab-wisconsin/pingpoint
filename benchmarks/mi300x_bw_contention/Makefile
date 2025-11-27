@@ -6,7 +6,7 @@ CC       := $(HIP_PATH)/bin/hipcc
 HIPOPTS  := --amdgpu-target=gfx942
 # HIPOPTS  += --save-temps
 
-TPX_MAX := 16 # thread blocks per xcd
+TPX_MAX := 36 # thread blocks per xcd
 BENCHMARKS := 
 
 BMK1 := bmk1

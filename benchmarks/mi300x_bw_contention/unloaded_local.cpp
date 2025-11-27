@@ -23,16 +23,8 @@ inline void gpuAssert(hipError_t code, const char *file, int line, bool abort=tr
     }
 }
 
-constexpr int THREADS_PER_WARP = 64;
-// constexpr int WARPS_PER_BLOCK = 16;  
-constexpr int WARPS_PER_BLOCK = 4;
-
 constexpr int PAGE_SIZE = (2 * 1024 * 1024); // 2MB huge page
 constexpr int CHUNK_SIZE = (4 * 1024); // 4KB chunk size
-
-struct chunk4KB {
-    char data[CHUNK_SIZE];
-};
 
 #define XCDS_NUM 8
 #define DEBUG 0
@@ -111,34 +103,37 @@ __global__ void k(uint64_t **xcd_chunks, size_t *xcd_chunks_size, uint32_t **cyc
 
 int main() {
 
+    const int n_threads_per_warp = 64;
+    const int n_warps_per_block = 4; // while max=16, set 4 s.t. each tb loads 64*4*16B=4KB chunk per iter
+
     /* configure thread blocks */
 
     const int n_blocks = (TPX * XCDS_NUM);
-    const int n_threads_per_block = (WARPS_PER_BLOCK * THREADS_PER_WARP);
+    const int n_threads_per_block = (n_warps_per_block * n_threads_per_warp);
     const int total_threads = (n_blocks * n_threads_per_block);
-    printf("n_blocks: %d, n_blocks_per_xcd: %d, n_warps_per_block: %d, n_threads_per_warp: %d\n", n_blocks, TPX, WARPS_PER_BLOCK, THREADS_PER_WARP);
-
-    const int n_pages = 128; // := 256 MB to fill up LLC
-    const size_t data_size = (n_pages * PAGE_SIZE);
-    const int n_4KB_chunks = data_size / (4 * 1024);
-    printf("data_size: %d MB\n", (int)data_size / (1024 * 1024));
+    printf("n_blocks: %d, n_blocks_per_xcd: %d, n_warps_per_block: %d, n_threads_per_warp: %d\n", n_blocks, TPX, n_warps_per_block, n_threads_per_warp);
 
     /* allocate data */
 
+    const int n_pages = 128; // := 256 MB to fill up LLC
+    const size_t data_size = (n_pages * PAGE_SIZE);
+    const int n_4KB_chunks = data_size / CHUNK_SIZE;
+    printf("data_size: %d MB\n", (int)data_size / (1024 * 1024));
+
     char *d_data;
     gpuErrchk(hipMalloc((void**)&d_data, data_size + 0x1000));
-    d_data = (char*)(((uintptr_t)d_data & ~(0x0FFF)) + 0x1000); // page align
+    d_data = (char*)(((uintptr_t)d_data & ~(0x0FFF)) + 0x1000);
 
     /* allocate cycles array */
 
-    uint32_t **d_cycles; // per-xcd, per-4KB cycles array
+    uint32_t **d_cycles; // per-xcd, per-4KB chunk. record cycles for home identification 
     gpuErrchk(hipMalloc((void**)&d_cycles, sizeof(uint32_t*) * XCDS_NUM));
     for (int x = 0; x < XCDS_NUM; x++) {
         gpuErrchk(hipMalloc((void**)&d_cycles[x], sizeof(uint32_t) * n_4KB_chunks ));
     }
     printf("allocated d_cycles array[%d][%d]\n", XCDS_NUM, n_4KB_chunks);
 
-    int *d_home; // home 'xcc' per 4KB 
+    int *d_home; // per-4KB chunk. record home xcd
     gpuErrchk(hipMalloc((void**)&d_home, sizeof(int) * n_4KB_chunks ));
 
     /* create cu masked stream */
@@ -165,7 +160,7 @@ int main() {
     
     gpuErrchk(hipExtStreamCreateWithCUMask(&stream, cuMaskSize, cuMask.data()));
     
-    /* launch kernel */
+    /* launch home identification kernel */
 
     hipLaunchKernelGGL(
         identify_home,
@@ -176,6 +171,7 @@ int main() {
     gpuErrchk(hipDeviceSynchronize());
 
     /* retrieve and process results */
+    
     uint32_t h_cycles[XCDS_NUM][n_4KB_chunks];;
     for (int x = 0; x < XCDS_NUM; x++) {
         gpuErrchk(hipMemcpy(&h_cycles[x][0], d_cycles[x], sizeof(uint32_t) * n_4KB_chunks, hipMemcpyDeviceToHost));
@@ -194,16 +190,19 @@ int main() {
         }
         h_home[i] = min_xcc;
         #if DEBUG
-        printf("4KB chunk[%zu]: home xcd %d\n", i, h_home[i]);
+        {
+            printf("4KB chunk[%zu]: home xcd %d\n", i, h_home[i]);
+        }
         #endif
     }
 
-    /* organize pointers to 4KB chunks per xcd */
+    /* group per-xcd 4KB chunk pointers */
     
     vector<vector<uint64_t>> xcd_chunks(XCDS_NUM);
     for (size_t i = 0; i < n_4KB_chunks; i++) {
-        xcd_chunks[h_home[i]].push_back(reinterpret_cast<uint64_t>(d_data) + i * (4 * 1024));
+        xcd_chunks[h_home[i]].push_back(reinterpret_cast<uint64_t>(d_data) + i * (CHUNK_SIZE));
     }
+
     uint64_t **d_xcd_chunks;
     gpuErrchk(hipMalloc((void**)&d_xcd_chunks, sizeof(uint64_t*) * XCDS_NUM));
     for (int x = 0; x < XCDS_NUM; x++) {
@@ -212,27 +211,34 @@ int main() {
         gpuErrchk(hipMemcpy(d_xcd_chunks[x], xcd_chunks[x].data(), sizeof(uint64_t) * n_chunks, hipMemcpyHostToDevice));
     }   
 
-    // at least total chunks of 8MB=2*L2_size per XCD
-    // very conservative, since 2 xcds on same iod actually share the home data
+    /* count # per-xcd 4KB chunk */
+
+    // ensure minimal 8MB = 2 * l2_size per-xcd chunks in order to thrash l2
+    // conservative. since 2 xcds on same iod actually share the home data, another approach can be
+    // ensure minimal 8MB per-iod chunks 
     vector<size_t> xcd_chunks_size(XCDS_NUM);
-    const int min_chunks = 2 * 1024; // 8MB to thrash xcd l2
-    int curr_min_chunks = INT_MAX;
+    const int min_n_chunks_per_xcd = 2 * 1024; // 4KB * 2k = 8MB
+    int curr_min_n_chunks_per_xcd = INT_MAX;
     for (int xcd = 0; xcd < XCDS_NUM; xcd++) {
         xcd_chunks_size[xcd] = xcd_chunks[xcd].size();
-        if (xcd_chunks[xcd].size() < curr_min_chunks) curr_min_chunks = xcd_chunks[xcd].size();
-        printf("XCD %d has %zu chunks (%.2f MB)\n", xcd, xcd_chunks[xcd].size(), (xcd_chunks[xcd].size() * 4.0) / 1024);
+        if (xcd_chunks[xcd].size() < curr_min_n_chunks_per_xcd) curr_min_n_chunks_per_xcd = xcd_chunks[xcd].size();
+        printf("xcd %d has %zu 4KB chunks (%.2f MB)\n", xcd, xcd_chunks[xcd].size(), (xcd_chunks[xcd].size() * 4.0) / 1024);
     }
-    assert(curr_min_chunks >= min_chunks);
+    assert(curr_min_n_chunks_per_xcd >= min_n_chunks_per_xcd);
+    
     size_t *d_xcd_chunks_size;
     gpuErrchk(hipMalloc((void**)&d_xcd_chunks_size, sizeof(size_t) * XCDS_NUM));
     gpuErrchk(hipMemcpy(d_xcd_chunks_size, xcd_chunks_size.data(), sizeof(size_t) * XCDS_NUM, hipMemcpyHostToDevice));
 
-    /* launch bw saturating kernel */
-    uint32_t **d_cycles_k;
+    /* allocate cycles_k array */
+
+    uint32_t **d_cycles_k; // per-xcd, per-tb in xcd. record cycles for bw measurement
     gpuErrchk(hipMalloc((void**)&d_cycles_k, sizeof(uint32_t*) * XCDS_NUM));
     for (int x = 0; x < XCDS_NUM; x++) {
         gpuErrchk(hipMalloc((void**)&d_cycles_k[x], sizeof(uint32_t) * TPX ));
     }
+
+    /* launch bw saturating kernel */
 
     hipLaunchKernelGGL(
         k,
@@ -245,19 +251,38 @@ int main() {
     gpuErrchk(hipDeviceSynchronize());
 
     /* retrieve and process results */
+
     uint32_t h_cycles_k[XCDS_NUM][TPX];
     for (int x = 0; x < XCDS_NUM; x++) {
         gpuErrchk(hipMemcpy(&h_cycles_k[x][0], d_cycles_k[x], sizeof(uint32_t) * TPX, hipMemcpyDeviceToHost));
     }
+
     // print in GB/s per tb
     for (int xcd = 0; xcd < XCDS_NUM; xcd++) {
+        uint32_t max_xcd_cycles = 0;
+
         for (int tbid_in_xcd = 0; tbid_in_xcd < TPX; tbid_in_xcd++) {
-            uint32_t cycles = h_cycles_k[xcd][tbid_in_xcd];
-            double time_sec = (double)cycles / 1e9; // 1GHz
-            double bytes = (double)(min_chunks * CHUNK_SIZE); // total bytes accessed
-            double bw_GBps = (bytes / time_sec) / 1e9;
-            printf("XCD %d, TB %d: cycles %u, time %.6f sec, bw %.2f GB/s\n", xcd, tbid_in_xcd, cycles, time_sec, bw_GBps);
+            // find max cycles among tbs in this xcd
+            if (h_cycles_k[xcd][tbid_in_xcd] > max_xcd_cycles) {
+                max_xcd_cycles = h_cycles_k[xcd][tbid_in_xcd];
+            }
+
+            #if DEBUG
+            {
+                uint32_t cycles = h_cycles_k[xcd][tbid_in_xcd];
+                double time_sec = (double)cycles / 2.1e9; // 2.1GHz
+                double bytes = (double)((xcd_chunks_size[xcd] / TPX) * CHUNK_SIZE); // total bytes accessed
+                double bw_GBps = (bytes / time_sec) / 1e9;
+                printf("xcd %d, tb %d: cycles %u, time %.6f sec, bytes %.2f MB\n", xcd, tbid_in_xcd, cycles, time_sec, bytes / (1024*1024));
+            }
+            #endif
         }
+
+        // print bw based on max cycles among tbs in this xcd
+        double time_sec = (double)max_xcd_cycles / 2.1e9; // 2.1GHz
+        double bytes = (double)(xcd_chunks_size[xcd] * CHUNK_SIZE); // total bytes accessed
+        double bw_GBps = (bytes / time_sec) / 1e9;
+        printf("xcd %d: max cycles %u, time %.6f sec, bytes %.2f MB, bw %.2f GB/s\n", xcd, max_xcd_cycles, time_sec, bytes / (1024*1024), bw_GBps);
     }   
     
     /* cleanup */
