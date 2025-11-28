@@ -7,9 +7,10 @@
 #include <hip/hip_runtime.h>
 
 #include "../mi300x_mapping/bmk1_ntbx.h"
+#include "../mi300x_mapping/bmk3.h"
 
-#ifndef TPX
-#define TPX 1
+#ifndef BPX
+#define BPX 1
 #endif
 
 #ifndef XCDS_NUM
@@ -168,11 +169,11 @@ int main() {
 
     /* configure thread blocks */
 
-    const int n_blocks = (TPX * XCDS_NUM);
+    const int n_blocks = (BPX * XCDS_NUM);
     const int n_threads_per_block = (n_warps_per_block * n_threads_per_warp);
     const int total_threads = (n_blocks * n_threads_per_block);
-    printf("n_xcds: %d, n_blocks: %d, n_blocks_per_xcd: %d, n_warps_per_block: %d, n_threads_per_warp: %d\n", XCDS_NUM, n_blocks, TPX, n_warps_per_block, n_threads_per_warp);
-
+    printf("n_xcds: %d, n_blocks: %d, n_blocks_per_xcd: %d, n_warps_per_block: %d, n_threads_per_warp: %d\n", XCDS_NUM, n_blocks, BPX, n_warps_per_block, n_threads_per_warp);
+    
     /* allocate data */
 
     const int n_pages = 128; // := 256 MB to fill up LLC
@@ -198,17 +199,10 @@ int main() {
 
     /* create cu masked stream */
 
-    hipDeviceProp_t props;
-    gpuErrchk(hipGetDeviceProperties(&props, 0));
-    
-    hipStream_t stream;
-    uint32_t cuMaskSize = (props.multiProcessorCount + 31) / 32;
-    vector<uint32_t> cuMask(cuMaskSize, 0); // Initialize all CUs as disabled. Use (uint32_t)-1 to enable all.
-
-    const size_t n_cus_enabled_per_xcd = n_blocks / 8;
-    for (int i = 0; i < n_cus_enabled_per_xcd; ++i) { 
-        cuMask[i/4] |= (0xffu << ((3-(i%4)) * 8));
-    }
+    uint32_t cuMaskSize;
+    vector<uint32_t> cuMask;
+    const size_t n_cus_to_enable_per_xcd = (n_blocks / XCDS_NUM);
+    const size_t n_cus_enabled_per_xcd = mask_cu(n_cus_to_enable_per_xcd, cuMaskSize, cuMask);
     printf("first %zu cus enabled per xcd\n", n_cus_enabled_per_xcd);
     #if DEBUG
     {
@@ -218,8 +212,9 @@ int main() {
     }
     #endif
     
+    hipStream_t stream;
     gpuErrchk(hipExtStreamCreateWithCUMask(&stream, cuMaskSize, cuMask.data()));
-    
+
     /* launch home identification kernel */
 
     hipLaunchKernelGGL(
@@ -295,7 +290,7 @@ int main() {
     uint32_t **d_cycles_k; // per-xcd, per-tb in xcd. record cycles for bw measurement
     gpuErrchk(hipMalloc((void**)&d_cycles_k, sizeof(uint32_t*) * XCDS_NUM));
     for (int x = 0; x < XCDS_NUM; x++) {
-        gpuErrchk(hipMalloc((void**)&d_cycles_k[x], sizeof(uint32_t) * TPX ));
+        gpuErrchk(hipMalloc((void**)&d_cycles_k[x], sizeof(uint32_t) * BPX ));
     }
 
     /* launch bw saturating kernel */
@@ -312,16 +307,16 @@ int main() {
 
     /* retrieve and process results */
 
-    uint32_t h_cycles_k[XCDS_NUM][TPX];
+    uint32_t h_cycles_k[XCDS_NUM][BPX];
     for (int x = 0; x < XCDS_NUM; x++) {
-        gpuErrchk(hipMemcpy(&h_cycles_k[x][0], d_cycles_k[x], sizeof(uint32_t) * TPX, hipMemcpyDeviceToHost));
+        gpuErrchk(hipMemcpy(&h_cycles_k[x][0], d_cycles_k[x], sizeof(uint32_t) * BPX, hipMemcpyDeviceToHost));
     }
 
     // print in GB/s per tb
     for (int xcd = 0; xcd < XCDS_NUM; xcd++) {
         uint32_t max_xcd_cycles = 0;
 
-        for (int tbid_in_xcd = 0; tbid_in_xcd < TPX; tbid_in_xcd++) {
+        for (int tbid_in_xcd = 0; tbid_in_xcd < BPX; tbid_in_xcd++) {
             // find max cycles among tbs in this xcd
             if (h_cycles_k[xcd][tbid_in_xcd] > max_xcd_cycles) {
                 max_xcd_cycles = h_cycles_k[xcd][tbid_in_xcd];
@@ -331,7 +326,7 @@ int main() {
             {
                 uint32_t cycles = h_cycles_k[xcd][tbid_in_xcd];
                 double time_sec = (double)cycles / 2.1e9; // 2.1GHz
-                double bytes = (double)((xcd_chunks_size[xcd] / TPX) * CHUNK_SIZE); // total bytes accessed
+                double bytes = (double)((xcd_chunks_size[xcd] / BPX) * CHUNK_SIZE); // total bytes accessed
                 double bw_GBps = (bytes / time_sec) / 1e9;
                 printf("xcd %d, tb %d: cycles %u, time %.6f sec, bytes %.2f MB\n", xcd, tbid_in_xcd, cycles, time_sec, bytes / (1024*1024));
             }

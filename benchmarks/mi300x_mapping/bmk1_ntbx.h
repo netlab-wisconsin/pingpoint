@@ -9,7 +9,7 @@
 #endif
 
 #ifndef XCDS_NUM
-#define XCDS_NUM 8
+#define XCDS_NUM 8 // num xcds in mi300x
 #endif
 
 __device__ int d_barrier_count = 0;
