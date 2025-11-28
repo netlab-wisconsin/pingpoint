@@ -4,12 +4,12 @@ HIP_PATH := /opt/rocm-7.1.0
 CC       := $(HIP_PATH)/bin/hipcc
 HIPOPTS  := --amdgpu-target=gfx942
 
-BPX_MAX  := 36
+BPX_MAX  := 160
 
 .PHONY: all clean
 
 all:
-	for t in $$(seq 1 $(BPX_MAX)); do \
+	@for t in $$(seq 1 $(BPX_MAX)); do \
 		cmd="$(CC) $(HIPOPTS) -DBPX=$${t} local.cpp -o $(BIN_DIR)/local_bpx_$${t}"; \
 		echo "$$cmd"; \
 		$$cmd || exit 1; \
@@ -22,5 +22,4 @@ local_bpx_%:
 	 echo "$$cmd"; $$cmd
 
 clean:
-	@echo "rm -f $(BIN_DIR)/local_bpx_*"
 	rm -f $(BIN_DIR)/local_bpx_*

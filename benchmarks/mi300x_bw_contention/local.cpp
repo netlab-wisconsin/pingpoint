@@ -61,7 +61,7 @@ void xcd_barrier(int xcd_id, int blocks_per_xcd)
 }
 
 
-__global__ void k(uint64_t **xcd_chunks, size_t *xcd_chunks_size, uint32_t **cycles) {
+__global__ void k(uint64_t **xcd_chunks, size_t *xcd_chunks_size, uint32_t **cycles_start, uint32_t **cycles_stop) {
     int bid = blockIdx.x;
     int tid = threadIdx.x;
     int uid = bid * blockDim.x + tid;
@@ -158,7 +158,8 @@ __global__ void k(uint64_t **xcd_chunks, size_t *xcd_chunks_size, uint32_t **cyc
     asm volatile("s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t"); // per ISA manual, need waitcnt after S_MEMTIME
 
     if (tid == 0) {
-        cycles[xcc_id][tbid_in_xcd] = stop - start;
+        cycles_start[xcc_id][tbid_in_xcd] = start;
+        cycles_stop[xcc_id][tbid_in_xcd] = stop;
     }
 }
 
@@ -286,12 +287,15 @@ int main() {
     gpuErrchk(hipMalloc((void**)&d_xcd_chunks_size, sizeof(size_t) * XCDS_NUM));
     gpuErrchk(hipMemcpy(d_xcd_chunks_size, xcd_chunks_size.data(), sizeof(size_t) * XCDS_NUM, hipMemcpyHostToDevice));
 
-    /* allocate cycles_k array */
+    /* allocate cycles_* array */
 
-    uint32_t **d_cycles_k; // per-xcd, per-tb in xcd. record cycles for bw measurement
-    gpuErrchk(hipMalloc((void**)&d_cycles_k, sizeof(uint32_t*) * XCDS_NUM));
+    // per-xcd, per-tb in xcd. record start/stop cycles for bw measurement
+    uint32_t **d_cycles_start, **d_cycles_stop; 
+    gpuErrchk(hipMalloc((void**)&d_cycles_start, sizeof(uint32_t*) * XCDS_NUM));
+    gpuErrchk(hipMalloc((void**)&d_cycles_stop, sizeof(uint32_t*) * XCDS_NUM));
     for (int x = 0; x < XCDS_NUM; x++) {
-        gpuErrchk(hipMalloc((void**)&d_cycles_k[x], sizeof(uint32_t) * BPX ));
+        gpuErrchk(hipMalloc((void**)&d_cycles_start[x], sizeof(uint32_t) * BPX ));
+        gpuErrchk(hipMalloc((void**)&d_cycles_stop[x], sizeof(uint32_t) * BPX ));
     }
 
     /* launch bw saturating kernel */
@@ -302,41 +306,64 @@ int main() {
         0, stream,
         d_xcd_chunks, 
         d_xcd_chunks_size,
-        d_cycles_k
+        d_cycles_start,
+        d_cycles_stop
     );
     gpuErrchk(hipDeviceSynchronize());
 
     /* retrieve and process results */
 
-    uint32_t h_cycles_k[XCDS_NUM][BPX];
+    uint32_t h_cycles_start[XCDS_NUM][BPX], h_cycles_stop[XCDS_NUM][BPX];
     for (int x = 0; x < XCDS_NUM; x++) {
-        gpuErrchk(hipMemcpy(&h_cycles_k[x][0], d_cycles_k[x], sizeof(uint32_t) * BPX, hipMemcpyDeviceToHost));
+        gpuErrchk(hipMemcpy(&h_cycles_start[x][0], d_cycles_start[x], sizeof(uint32_t) * BPX, hipMemcpyDeviceToHost));
+        gpuErrchk(hipMemcpy(&h_cycles_stop[x][0], d_cycles_stop[x], sizeof(uint32_t) * BPX, hipMemcpyDeviceToHost));
     }
 
     // print in GB/s per tb
     for (int xcd = 0; xcd < XCDS_NUM; xcd++) {
-        double avg_xcd_cycles = 0;
+        // for avg lat calc
+        double avg_xcd_cycles = 0.0;
+        // for bw calc
+        uint32_t min_xcd_cycles_start = 0xFFFFFFFF;
+        uint32_t max_xcd_cycles_stop = 0;
 
         for (int tbid_in_xcd = 0; tbid_in_xcd < BPX; tbid_in_xcd++) {
-            avg_xcd_cycles += (h_cycles_k[xcd][tbid_in_xcd] - avg_xcd_cycles) / (tbid_in_xcd + 1); // incremental avg
+            // incremental avg
+            avg_xcd_cycles += ((h_cycles_stop[xcd][tbid_in_xcd] - h_cycles_start[xcd][tbid_in_xcd]) - avg_xcd_cycles) / (tbid_in_xcd + 1);
+
+            // set earliest start cycle for this xcd
+            if (h_cycles_start[xcd][tbid_in_xcd] < min_xcd_cycles_start) {
+                min_xcd_cycles_start = h_cycles_start[xcd][tbid_in_xcd];
+            }
+            // set latest stop cycle for this xcd
+            if (h_cycles_stop[xcd][tbid_in_xcd] > max_xcd_cycles_stop) {
+                max_xcd_cycles_stop = h_cycles_stop[xcd][tbid_in_xcd];
+            }
 
             #if LOG_RESULT_VERBOSE
             {
-                uint32_t cycles = h_cycles_k[xcd][tbid_in_xcd];
+                // log per-tb results
+                uint32_t cycles = h_cycles_stop[xcd][tbid_in_xcd] - h_cycles_start[xcd][tbid_in_xcd];
                 double bytes = (double)((xcd_chunks_size[xcd] / BPX) * CHUNK_SIZE);
                 double cycles_per_load = (double)cycles / (bytes / n_threads_per_block / 16.0); // per 16B load
-                printf("xcd %d, tb %d: cycles %u, latency(16B) %.2f cycles\n", xcd, tbid_in_xcd, cycles, cycles_per_load);
+                printf("xcd %d, tb %d: cycles %u, lat(16B) %.2f cycles\n", 
+                        xcd, tbid_in_xcd, cycles, cycles_per_load);
             }
             #endif
         }
 
         // print bw based on max cycles among tbs in this xcd
-        double time_sec = (double)avg_xcd_cycles / 2.1e9; // 2.1GHz
+        double time_sec = (double)(max_xcd_cycles_stop - min_xcd_cycles_start) / 2.1e9; // 2.1GHz
         double bytes = (double)(xcd_chunks_size[xcd] * CHUNK_SIZE); // total bytes accessed
-        double bw_GBps = (bytes / time_sec) / 1e9;
-        printf("xcd %d: avg cycles %llu, time %.6f sec, bytes %.2f MB, bw %.2f GB/s\n", xcd, (unsigned long long)avg_xcd_cycles, time_sec, bytes / (1024*1024), bw_GBps);
-    }   
-    
+        double bw_GBps = (bytes / time_sec) / 1e9;      
+        double lat_cycles_16B = avg_xcd_cycles / (bytes / (n_threads_per_block * BPX) / 16.0);
+
+        printf("xcd %d: time %.6f sec, bytes %.2f MB, "
+                "lat(16B) %.2f cycles, bw %.2f GB/s\n",
+                xcd, time_sec, bytes / (1024 * 1024), 
+                lat_cycles_16B, bw_GBps);
+    }
+
     /* cleanup */
     gpuErrchk(hipFree(d_data));
 
