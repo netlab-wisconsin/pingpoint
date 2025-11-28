@@ -30,10 +30,11 @@ inline void gpuAssert(hipError_t code, const char *file, int line, bool abort=tr
 
 constexpr int PAGE_SIZE = (2 * 1024 * 1024); // 2MB huge page
 constexpr int CHUNK_SIZE = (4 * 1024); // 4KB chunk size
+constexpr int CLOCK = 2.1e9; // 2.1GHz
 
 #define D_LOG_TID_0 0
 #define DEBUG 0
-#define LOG_RESULT_VERBOSE 1
+#define LOG_RESULT_VERBOSE 0
 
 // per-xcd barrier
 __device__ int d_xcd_barrier_count[XCDS_NUM] = {0};
@@ -319,11 +320,10 @@ int main() {
         gpuErrchk(hipMemcpy(&h_cycles_stop[x][0], d_cycles_stop[x], sizeof(uint32_t) * BPX, hipMemcpyDeviceToHost));
     }
 
-    // print in GB/s per tb
     for (int xcd = 0; xcd < XCDS_NUM; xcd++) {
         // for avg lat calc
         double avg_xcd_cycles = 0.0;
-        // for bw calc
+        // for global bw calc
         uint32_t min_xcd_cycles_start = 0xFFFFFFFF;
         uint32_t max_xcd_cycles_stop = 0;
 
@@ -344,24 +344,56 @@ int main() {
             {
                 // log per-tb results
                 uint32_t cycles = h_cycles_stop[xcd][tbid_in_xcd] - h_cycles_start[xcd][tbid_in_xcd];
-                double bytes = (double)((xcd_chunks_size[xcd] / BPX) * CHUNK_SIZE);
+                double bytes = (double)((xcd_chunks_size[xcd] / BPX) * CHUNK_SIZE); // total bytes accessed by this tb
                 double cycles_per_load = (double)cycles / (bytes / n_threads_per_block / 16.0); // per 16B load
-                printf("xcd %d, tb %d: cycles %u, lat(16B) %.2f cycles\n", 
-                        xcd, tbid_in_xcd, cycles, cycles_per_load);
+                printf("xcd %d, tb %d: start %u, stop %u, lat(16B) %.2f cycles\n", 
+                        xcd, tbid_in_xcd, h_cycles_start[xcd][tbid_in_xcd], h_cycles_stop[xcd][tbid_in_xcd], cycles_per_load);
             }
             #endif
         }
 
-        // print bw based on max cycles among tbs in this xcd
-        double time_sec = (double)(max_xcd_cycles_stop - min_xcd_cycles_start) / 2.1e9; // 2.1GHz
-        double bytes = (double)(xcd_chunks_size[xcd] * CHUNK_SIZE); // total bytes accessed
-        double bw_GBps = (bytes / time_sec) / 1e9;      
-        double lat_cycles_16B = avg_xcd_cycles / (bytes / (n_threads_per_block * BPX) / 16.0);
+        // avg. latency (RTT)
+        const double bytes = (double)(xcd_chunks_size[xcd] * CHUNK_SIZE); // total bytes accessed by this xcd
+        const double lat_cycles_16B = avg_xcd_cycles / (bytes / (n_threads_per_block * BPX) / 16.0);  // avg cycles per 16B load
+        printf("xcd %d: avg lat(16B) %.2f cycles\n", xcd, lat_cycles_16B);
 
-        printf("xcd %d: time %.6f sec, bytes %.2f MB, "
-                "lat(16B) %.2f cycles, bw %.2f GB/s\n",
-                xcd, time_sec, bytes / (1024 * 1024), 
-                lat_cycles_16B, bw_GBps);
+        // global bw
+        // bw based on max cycles among tbs in this xcd
+        const double global_time_sec = (double)(max_xcd_cycles_stop - min_xcd_cycles_start) / CLOCK;
+        const double global_bw_GBps = (bytes / global_time_sec) / 1e9;
+        printf("xcd %d: global bw %.2f GB/s\n", xcd, global_bw_GBps);
+
+        // rolling window bw
+        // bw based on rolling window of 2 * avg RTT cycles
+        const double window = 2 * lat_cycles_16B; // 2 * RTT
+        const double window_time_sec = (double)window / CLOCK; // 2.1GHz
+        double peak_window_bw_GBps = 0.0;
+        for (uint32_t t = min_xcd_cycles_start; t < max_xcd_cycles_stop; t+=window) {
+            double window_bytes = 0.0;
+            for (int tbid_in_xcd = 0; tbid_in_xcd < BPX; tbid_in_xcd++) {
+                if ( (t >= h_cycles_start[xcd][tbid_in_xcd]) && (t < h_cycles_stop[xcd][tbid_in_xcd]) ) {
+                    // increment bytes by the approx. proportion loaded in this window
+                    double bytes_contrib = (double)((xcd_chunks_size[xcd] / BPX) * CHUNK_SIZE) * \
+                                        (window / (h_cycles_stop[xcd][tbid_in_xcd] - h_cycles_start[xcd][tbid_in_xcd]));
+                    window_bytes += bytes_contrib;
+                }
+            }
+            const double window_bw_GBps = (window_bytes / window_time_sec) / 1e9;
+            if (window_bw_GBps > peak_window_bw_GBps) {
+                peak_window_bw_GBps = window_bw_GBps;
+            }
+            
+            #if LOG_RESULT_VERBOSE
+            {
+                printf("xcd %d: window bw %.2f GB/s [%u-%u]\n",
+                        xcd, window_bw_GBps, (unsigned int)(t), (unsigned int)(t + window));
+            }
+            #endif
+        }
+        printf("xcd %d: peak window bw %.2f GB/s\n", xcd, peak_window_bw_GBps);
+
+        // print some misc
+        printf("xcd %d: time %.6f sec, bytes %.2f MB\n", xcd, global_time_sec, bytes / (1024 * 1024));
     }
 
     /* cleanup */
