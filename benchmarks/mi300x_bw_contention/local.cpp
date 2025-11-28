@@ -33,6 +33,7 @@ constexpr int CHUNK_SIZE = (4 * 1024); // 4KB chunk size
 
 #define D_LOG_TID_0 0
 #define DEBUG 0
+#define LOG_RESULT_VERBOSE 1
 
 // per-xcd barrier
 __device__ int d_xcd_barrier_count[XCDS_NUM] = {0};
@@ -314,30 +315,26 @@ int main() {
 
     // print in GB/s per tb
     for (int xcd = 0; xcd < XCDS_NUM; xcd++) {
-        uint32_t max_xcd_cycles = 0;
+        double avg_xcd_cycles = 0;
 
         for (int tbid_in_xcd = 0; tbid_in_xcd < BPX; tbid_in_xcd++) {
-            // find max cycles among tbs in this xcd
-            if (h_cycles_k[xcd][tbid_in_xcd] > max_xcd_cycles) {
-                max_xcd_cycles = h_cycles_k[xcd][tbid_in_xcd];
-            }
+            avg_xcd_cycles += (h_cycles_k[xcd][tbid_in_xcd] - avg_xcd_cycles) / (tbid_in_xcd + 1); // incremental avg
 
-            #if DEBUG
+            #if LOG_RESULT_VERBOSE
             {
                 uint32_t cycles = h_cycles_k[xcd][tbid_in_xcd];
-                double time_sec = (double)cycles / 2.1e9; // 2.1GHz
-                double bytes = (double)((xcd_chunks_size[xcd] / BPX) * CHUNK_SIZE); // total bytes accessed
-                double bw_GBps = (bytes / time_sec) / 1e9;
-                printf("xcd %d, tb %d: cycles %u, time %.6f sec, bytes %.2f MB\n", xcd, tbid_in_xcd, cycles, time_sec, bytes / (1024*1024));
+                double bytes = (double)((xcd_chunks_size[xcd] / BPX) * CHUNK_SIZE);
+                double cycles_per_load = (double)cycles / (bytes / n_threads_per_block / 16.0); // per 16B load
+                printf("xcd %d, tb %d: cycles %u, latency(16B) %.2f cycles\n", xcd, tbid_in_xcd, cycles, cycles_per_load);
             }
             #endif
         }
 
         // print bw based on max cycles among tbs in this xcd
-        double time_sec = (double)max_xcd_cycles / 2.1e9; // 2.1GHz
+        double time_sec = (double)avg_xcd_cycles / 2.1e9; // 2.1GHz
         double bytes = (double)(xcd_chunks_size[xcd] * CHUNK_SIZE); // total bytes accessed
         double bw_GBps = (bytes / time_sec) / 1e9;
-        printf("xcd %d: max cycles %u, time %.6f sec, bytes %.2f MB, bw %.2f GB/s\n", xcd, max_xcd_cycles, time_sec, bytes / (1024*1024), bw_GBps);
+        printf("xcd %d: avg cycles %llu, time %.6f sec, bytes %.2f MB, bw %.2f GB/s\n", xcd, (unsigned long long)avg_xcd_cycles, time_sec, bytes / (1024*1024), bw_GBps);
     }   
     
     /* cleanup */
