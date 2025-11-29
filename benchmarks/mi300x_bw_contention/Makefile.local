@@ -4,7 +4,7 @@ HIP_PATH := /opt/rocm-7.1.0
 CC       := $(HIP_PATH)/bin/hipcc
 HIPOPTS  := --amdgpu-target=gfx942
 
-BPX_MAX  := 160
+BPX_MAX  := 275
 
 .PHONY: all clean
 
