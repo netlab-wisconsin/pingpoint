@@ -166,6 +166,7 @@ __global__ void k(uint64_t **xcd_chunks, size_t *xcd_chunks_size, uint32_t **cyc
 
 
 int main() {
+    printf("local\n");
 
     const int n_threads_per_warp = 64;
     const int n_warps_per_block = 4; // while max=16, set 4 s.t. each tb loads 64*4*16B=4KB chunk per iter

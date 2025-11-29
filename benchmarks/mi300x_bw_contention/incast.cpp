@@ -1,4 +1,4 @@
-// all xcds generate tornado iod traffic
+// all xcds generate incast iod traffic
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,8 +17,8 @@
 #define XCDS_NUM 8
 #endif
 
-#ifndef XTO
-#define XTO 2 // xcd tornado offset. 2 = 1 iod hop, 4 = 2 iod hops
+#ifndef TGT_XCD
+#define TGT_XCD 0 // target xcd for incast
 #endif
 
 using namespace std;
@@ -91,8 +91,8 @@ __global__ void k(uint64_t **xcd_chunks, size_t *xcd_chunks_size, uint32_t **cyc
         #endif
     }
 
-    // set dst as tornado
-    const uint32_t xcd_dst = (xcc_id + XTO) % XCDS_NUM;
+    // set dst as incast target
+    const uint32_t xcd_dst = TGT_XCD;
 
     // warmup
     // only 1 thread per xcd warms up entirely
@@ -173,17 +173,7 @@ __global__ void k(uint64_t **xcd_chunks, size_t *xcd_chunks_size, uint32_t **cyc
 
 
 int main() {
-    switch (XTO) {
-        case 2:
-            printf("tornado traffic (1 hop)\n");
-            break;
-        case 4:
-            printf("tornado traffic (2 hops)\n");
-            break;
-        default:
-            printf("invalid XTO %d\n", XTO);
-            exit(1);
-    }
+    printf("incast to xcd %d\n", TGT_XCD);
 
     const int n_threads_per_warp = 64;
     const int n_warps_per_block = 4; // while max=16, set 4 s.t. each tb loads 64*4*16B=4KB chunk per iter
@@ -345,8 +335,8 @@ int main() {
         uint32_t min_xcd_cycles_start = 0xFFFFFFFF;
         uint32_t max_xcd_cycles_stop = 0;
 
-        // set dst xcd as tornado
-        const uint32_t xcd_dst = (xcd + XTO) % XCDS_NUM;
+        // set dst xcd as incast target
+        const uint32_t xcd_dst = TGT_XCD;
 
         for (int tbid_in_xcd = 0; tbid_in_xcd < BPX; tbid_in_xcd++) {
             // incremental avg
