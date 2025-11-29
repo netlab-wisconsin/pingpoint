@@ -1,4 +1,4 @@
-// all xcds generate local iod traffic
+// all xcds generate tornado iod traffic
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +15,10 @@
 
 #ifndef XCDS_NUM
 #define XCDS_NUM 8
+#endif
+
+#ifndef XTO
+#define XTO 2 // xcd tornado offset. 2 = 1 iod hop, 4 = 2 iod hops
 #endif
 
 using namespace std;
@@ -87,11 +91,14 @@ __global__ void k(uint64_t **xcd_chunks, size_t *xcd_chunks_size, uint32_t **cyc
         #endif
     }
 
+    // set dst as tornado
+    const uint32_t xcc_dst = (xcc_id + XTO) % XCDS_NUM;
+
     // warmup
     // only 1 thread per xcd warms up entirely
     if (tbid_in_xcd == 0 && tid == 0) {
-        for (size_t i = 0; i < xcd_chunks_size[xcc_id]; i++) {
-            uint64_t ptr = xcd_chunks[xcc_id][i];
+        for (size_t i = 0; i < xcd_chunks_size[xcc_dst]; i++) {
+            uint64_t ptr = xcd_chunks[xcc_dst][i];
             uint4 *data_ptr = (uint4*)ptr;
             for (size_t offset = 0; offset < (CHUNK_SIZE / sizeof(uint4)); offset++) {
                 asm volatile (
@@ -107,7 +114,7 @@ __global__ void k(uint64_t **xcd_chunks, size_t *xcd_chunks_size, uint32_t **cyc
     xcd_barrier(xcc_id, n_tbs_in_xcd); // sync xcd
 
     // measurement
-    size_t n_iter = xcd_chunks_size[xcc_id] / n_tbs_in_xcd;
+    size_t n_iter = xcd_chunks_size[xcc_dst] / n_tbs_in_xcd;
     if (tid == 0) {
         #if DEBUG
         printf("bid %d (tbid_in_xcd %d) on xcc %d: n_iter %zu\n", bid, tbid_in_xcd, xcc_id, n_iter);
@@ -121,7 +128,7 @@ __global__ void k(uint64_t **xcd_chunks, size_t *xcd_chunks_size, uint32_t **cyc
 
     for (size_t iter = 0; iter < n_iter; iter++) {
         size_t chunk_idx = tbid_in_xcd + iter * n_tbs_in_xcd;
-        uint64_t ptr = xcd_chunks[xcc_id][chunk_idx];
+        uint64_t ptr = xcd_chunks[xcc_dst][chunk_idx];
         uint4 *data_ptr = (uint4*)ptr;
         
         // see tid 0 cycle counts for debug
@@ -166,6 +173,17 @@ __global__ void k(uint64_t **xcd_chunks, size_t *xcd_chunks_size, uint32_t **cyc
 
 
 int main() {
+    switch (XTO) {
+        case 2:
+            printf("tornado traffic (1 hop)\n");
+            break;
+        case 4:
+            printf("tornado traffic (2 hops)\n");
+            break;
+        default:
+            printf("invalid XTO %d\n", XTO);
+            exit(1);
+    }
 
     const int n_threads_per_warp = 64;
     const int n_warps_per_block = 4; // while max=16, set 4 s.t. each tb loads 64*4*16B=4KB chunk per iter
@@ -327,6 +345,9 @@ int main() {
         uint32_t min_xcd_cycles_start = 0xFFFFFFFF;
         uint32_t max_xcd_cycles_stop = 0;
 
+        // set dst xcd as tornado
+        const uint32_t xcd_dst = (xcd + XTO) % XCDS_NUM;
+
         for (int tbid_in_xcd = 0; tbid_in_xcd < BPX; tbid_in_xcd++) {
             // incremental avg
             avg_xcd_cycles += ((h_cycles_stop[xcd][tbid_in_xcd] - h_cycles_start[xcd][tbid_in_xcd]) - avg_xcd_cycles) / (tbid_in_xcd + 1);
@@ -344,7 +365,7 @@ int main() {
             {
                 // log per-tb results
                 uint32_t cycles = h_cycles_stop[xcd][tbid_in_xcd] - h_cycles_start[xcd][tbid_in_xcd];
-                double bytes = (double)((xcd_chunks_size[xcd] / BPX) * CHUNK_SIZE); // total bytes accessed by this tb
+                double bytes = (double)((xcd_chunks_size[xcd_dst] / BPX) * CHUNK_SIZE); // total bytes accessed by this tb
                 double cycles_per_load = (double)cycles / (bytes / n_threads_per_block / 16.0); // per 16B load
                 printf("xcd %d, tb %d: start %u, stop %u, lat(16B) %.2f cycles\n", 
                         xcd, tbid_in_xcd, h_cycles_start[xcd][tbid_in_xcd], h_cycles_stop[xcd][tbid_in_xcd], cycles_per_load);
@@ -353,7 +374,7 @@ int main() {
         }
 
         // avg. latency (RTT)
-        const double bytes = (double)(xcd_chunks_size[xcd] * CHUNK_SIZE); // total bytes accessed by this xcd
+        const double bytes = (double)(xcd_chunks_size[xcd_dst] * CHUNK_SIZE); // total bytes accessed by this xcd
         const double lat_cycles_16B = avg_xcd_cycles / (bytes / (n_threads_per_block * BPX) / 16.0);  // avg cycles per 16B load
         printf("xcd %d: avg lat(16B) %.2f cycles\n", xcd, lat_cycles_16B);
 
@@ -373,7 +394,7 @@ int main() {
             for (int tbid_in_xcd = 0; tbid_in_xcd < BPX; tbid_in_xcd++) {
                 if ( (t >= h_cycles_start[xcd][tbid_in_xcd]) && (t < h_cycles_stop[xcd][tbid_in_xcd]) ) {
                     // increment bytes by the approx. proportion loaded in this window
-                    double bytes_contrib = (double)((xcd_chunks_size[xcd] / BPX) * CHUNK_SIZE) * \
+                    double bytes_contrib = (double)((xcd_chunks_size[xcd_dst] / BPX) * CHUNK_SIZE) * \
                                         (window / (h_cycles_stop[xcd][tbid_in_xcd] - h_cycles_start[xcd][tbid_in_xcd]));
                     window_bytes += bytes_contrib;
                 }
