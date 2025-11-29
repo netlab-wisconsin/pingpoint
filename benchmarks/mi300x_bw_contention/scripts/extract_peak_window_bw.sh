@@ -2,11 +2,11 @@
 
 BASE_DIR=${HOME}/workspace/ici-workspace/ici/benchmarks/mi300x_bw_contention
 
-out="${BASE_DIR}/results/local_bpx_bw.csv"
+out="${BASE_DIR}/results/112825_tornado_save/tornado_hop1_bw.csv"
 rm -f "$out"
 
 for bpx in $(seq 1 275); do
-    file="${BASE_DIR}/results/local_bpx_${bpx}.out"
+    file="${BASE_DIR}/results/112825_tornado_save/tornado_bpx_${bpx}_hop_1.out"
     if [[ ! -f "$file" ]]; then
         echo "Warning: $file not found" >&2
         continue
