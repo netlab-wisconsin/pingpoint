@@ -29,7 +29,7 @@ inline void gpuAssert(hipError_t code, const char *file, int line, bool abort=tr
 }
 
 constexpr int PAGE_SIZE = (2 * 1024 * 1024); // 2MB huge page
-constexpr int CHUNK_SIZE = (4 * 1024); // 4KB chunk size
+constexpr int CHUNK_SIZE = (2 * 1024); // chunk size (2KB/4KB). default 2KB to match interleaving granularity
 constexpr int CLOCK = 2.1e9; // 2.1GHz
 
 #define D_LOG_TID_0 0
@@ -169,7 +169,8 @@ int main() {
     printf("local\n");
 
     const int n_threads_per_warp = 64;
-    const int n_warps_per_block = 4; // while max=16, set 4 s.t. each tb loads 64*4*16B=4KB chunk per iter
+    const int n_warps_per_block = (CHUNK_SIZE / (n_threads_per_warp * 16)); // set to make each tb load 1 chunk per iter. each thread loads 16B per iter.
+    assert( (n_threads_per_warp * n_warps_per_block) <= 1024 );
 
     /* configure thread blocks */
 
@@ -182,8 +183,8 @@ int main() {
 
     const int n_pages = 128; // := 256 MB to fill up LLC
     const size_t data_size = (n_pages * PAGE_SIZE);
-    const int n_4KB_chunks = data_size / CHUNK_SIZE;
-    printf("data_size: %d MB\n", (int)data_size / (1024 * 1024));
+    const int n_chunks = data_size / CHUNK_SIZE;
+    printf("data_size: %d MB, chunk_size: %d KB\n", (int)data_size / (1024 * 1024), CHUNK_SIZE / 1024);
 
     char *d_data;
     gpuErrchk(hipMalloc((void**)&d_data, data_size + 0x1000));
@@ -191,15 +192,15 @@ int main() {
 
     /* allocate cycles array */
 
-    uint32_t **d_cycles; // per-xcd, per-4KB chunk. record cycles for home identification 
+    uint32_t **d_cycles; // per-xcd, per-chunk. record cycles for home identification 
     gpuErrchk(hipMalloc((void**)&d_cycles, sizeof(uint32_t*) * XCDS_NUM));
     for (int x = 0; x < XCDS_NUM; x++) {
-        gpuErrchk(hipMalloc((void**)&d_cycles[x], sizeof(uint32_t) * n_4KB_chunks ));
+        gpuErrchk(hipMalloc((void**)&d_cycles[x], sizeof(uint32_t) * n_chunks ));
     }
-    printf("allocated d_cycles array[%d][%d]\n", XCDS_NUM, n_4KB_chunks);
+    printf("allocated d_cycles array[%d][%d]\n", XCDS_NUM, n_chunks);
 
-    int *d_home; // per-4KB chunk. record home xcd
-    gpuErrchk(hipMalloc((void**)&d_home, sizeof(int) * n_4KB_chunks ));
+    int *d_home; // per-chunk. record home xcd
+    gpuErrchk(hipMalloc((void**)&d_home, sizeof(int) * n_chunks ));
 
     /* create cu masked stream */
 
@@ -231,13 +232,13 @@ int main() {
 
     /* retrieve and process results */
     
-    uint32_t h_cycles[XCDS_NUM][n_4KB_chunks];;
+    uint32_t h_cycles[XCDS_NUM][n_chunks];;
     for (int x = 0; x < XCDS_NUM; x++) {
-        gpuErrchk(hipMemcpy(&h_cycles[x][0], d_cycles[x], sizeof(uint32_t) * n_4KB_chunks, hipMemcpyDeviceToHost));
+        gpuErrchk(hipMemcpy(&h_cycles[x][0], d_cycles[x], sizeof(uint32_t) * n_chunks, hipMemcpyDeviceToHost));
     }
     
-    int h_home[n_4KB_chunks];
-    for (size_t i = 0; i < n_4KB_chunks; i++) {
+    int h_home[n_chunks];
+    for (size_t i = 0; i < n_chunks; i++) {
         uint32_t min_cycles = 0xFFFFFFFF;
         int min_xcc = -1;
         for (int xcc = 0; xcc < XCDS_NUM; xcc++) {
@@ -250,15 +251,15 @@ int main() {
         h_home[i] = min_xcc;
         #if DEBUG
         {
-            printf("4KB chunk[%zu]: home xcd %d\n", i, h_home[i]);
+            printf("chunk[%zu]: home xcd %d\n", i, h_home[i]);
         }
         #endif
     }
 
-    /* group per-xcd 4KB chunk pointers */
+    /* group per-xcd chunk pointers */
     
     vector<vector<uint64_t>> xcd_chunks(XCDS_NUM);
-    for (size_t i = 0; i < n_4KB_chunks; i++) {
+    for (size_t i = 0; i < n_chunks; i++) {
         xcd_chunks[h_home[i]].push_back(reinterpret_cast<uint64_t>(d_data) + i * (CHUNK_SIZE));
     }
 
@@ -270,18 +271,18 @@ int main() {
         gpuErrchk(hipMemcpy(d_xcd_chunks[x], xcd_chunks[x].data(), sizeof(uint64_t) * n_chunks, hipMemcpyHostToDevice));
     }   
 
-    /* count # per-xcd 4KB chunk */
+    /* count # per-xcd chunk */
 
     // ensure minimal 8MB = 2 * l2_size per-xcd chunks in order to thrash l2
     // conservative. since 2 xcds on same iod actually share the home data, another approach can be
     // ensure minimal 8MB per-iod chunks 
     vector<size_t> xcd_chunks_size(XCDS_NUM);
-    const int min_n_chunks_per_xcd = 2 * 1024; // 4KB * 2k = 8MB
+    const int min_n_chunks_per_xcd = ((4*2 * 1024 * 1024) / (CHUNK_SIZE)); // minimal #chunks >= 8MB 
     int curr_min_n_chunks_per_xcd = INT_MAX;
     for (int xcd = 0; xcd < XCDS_NUM; xcd++) {
         xcd_chunks_size[xcd] = xcd_chunks[xcd].size();
         if (xcd_chunks[xcd].size() < curr_min_n_chunks_per_xcd) curr_min_n_chunks_per_xcd = xcd_chunks[xcd].size();
-        printf("xcd %d has %zu 4KB chunks (%.2f MB)\n", xcd, xcd_chunks[xcd].size(), (xcd_chunks[xcd].size() * 4.0) / 1024);
+        printf("xcd %d has %zu chunks (%.2f MB)\n", xcd, xcd_chunks[xcd].size(), (xcd_chunks[xcd].size() * CHUNK_SIZE) / (1024.0 * 1024.0));
     }
     assert(curr_min_n_chunks_per_xcd >= min_n_chunks_per_xcd);
     
