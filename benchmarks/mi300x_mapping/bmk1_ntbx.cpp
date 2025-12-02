@@ -25,12 +25,11 @@ inline void gpuAssert(hipError_t code, const char *file, int line, bool abort=tr
     }
 }
 
-constexpr int THREADS_PER_WARP = 64;
-// constexpr int WARPS_PER_BLOCK = 16;  
-constexpr int WARPS_PER_BLOCK = 4;
-
 constexpr int PAGE_SIZE = (2 * 1024 * 1024); // 2MB huge page
-constexpr int CHUNK_SIZE = (4 * 1024); // 4KB chunk size
+constexpr int CHUNK_SIZE = (2 * 1024); // 2KB/4KB chunk size
+
+constexpr int THREADS_PER_WARP = 64;
+constexpr int WARPS_PER_BLOCK = (CHUNK_SIZE / (16 * THREADS_PER_WARP)); // one block per chunk
 
 #define DEBUG 0
 
@@ -55,15 +54,15 @@ int main() {
 
     /* allocate cycles array */
 
-    uint32_t **d_cycles; // per-xcd, per-4KB cycles array
+    uint32_t **d_cycles; // per-xcd, per-chunk cycles array
     gpuErrchk(hipMalloc((void**)&d_cycles, sizeof(uint32_t*) * XCDS_NUM));
     for (int x = 0; x < XCDS_NUM; x++) {
-        gpuErrchk(hipMalloc((void**)&d_cycles[x], sizeof(uint32_t) * (data_size / (4 * 1024)) ));
+        gpuErrchk(hipMalloc((void**)&d_cycles[x], sizeof(uint32_t) * (data_size / CHUNK_SIZE) ));
     }
-    printf("allocated d_cycles array[%d][%d]\n", XCDS_NUM, (int)data_size / (4 * 1024));
+    printf("allocated d_cycles array[%d][%d]\n", XCDS_NUM, (int)data_size / CHUNK_SIZE);
 
-    int *d_home; // home 'xcc' per 4KB 
-    gpuErrchk(hipMalloc((void**)&d_home, sizeof(int) * (data_size / (4 * 1024)) ));
+    int *d_home; // home 'xcc' per chunk 
+    gpuErrchk(hipMalloc((void**)&d_home, sizeof(int) * (data_size / CHUNK_SIZE) ));
 
     /* create cu masked stream */
 
@@ -100,13 +99,13 @@ int main() {
     gpuErrchk(hipDeviceSynchronize());
 
     /* retrieve and process results */
-    uint32_t h_cycles[XCDS_NUM][data_size / (4 * 1024)];;
+    uint32_t h_cycles[XCDS_NUM][data_size / CHUNK_SIZE];
     for (int x = 0; x < XCDS_NUM; x++) {
-        gpuErrchk(hipMemcpy(&h_cycles[x][0], d_cycles[x], sizeof(uint32_t) * (data_size / (4 * 1024)), hipMemcpyDeviceToHost));
+        gpuErrchk(hipMemcpy(&h_cycles[x][0], d_cycles[x], sizeof(uint32_t) * (data_size / CHUNK_SIZE), hipMemcpyDeviceToHost));
     }
     
-    int h_home[data_size / (4 * 1024)];
-    for (size_t i = 0; i < data_size / (4 * 1024); i++) {
+    int h_home[data_size / CHUNK_SIZE];
+    for (size_t i = 0; i < (data_size / CHUNK_SIZE); i++) {
         uint32_t min_cycles = 0xFFFFFFFF;
         int min_xcc = -1;
         for (int xcc = 0; xcc < XCDS_NUM; xcc++) {

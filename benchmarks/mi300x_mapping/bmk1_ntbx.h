@@ -62,11 +62,11 @@ __global__ void identify_home(void *data, size_t size, uint32_t **d_cycles, int 
     }
 
     uint4 *data_u4 = (uint4*)data;
-    size_t n_chunks = size / sizeof(uint4);
-    size_t n_iter = n_chunks / (blockDim.x * n_tbs_in_xcd); // thread blocks on same xcd streams over the data chunks
+    size_t n_16Bs = size / sizeof(uint4);
+    size_t n_iter = n_16Bs / (blockDim.x * n_tbs_in_xcd); // thread blocks on same xcd streams over the data chunks
     if (bid == 0 && tid == 0) {
-        printf("n_chunks: %zu, n_iter: %zu\n", n_chunks, n_iter);
-        printf("working set per xcd: %.2f MB\n", (n_chunks * sizeof(uint4) / XCDS_NUM) / (1024.0 * 1024.0));
+        printf("n_16Bs: %zu, n_iter: %zu\n", n_16Bs, n_iter);
+        printf("working set per xcd: %.2f MB\n", (n_16Bs * sizeof(uint4) / XCDS_NUM) / (1024.0 * 1024.0));
     }
 
     // uint4 tmp;
@@ -93,7 +93,7 @@ __global__ void identify_home(void *data, size_t size, uint32_t **d_cycles, int 
 
     // latency measurement
     uint32_t start = 0, end = 0;
-    uint32_t cycles[n_iter]; // temporary... move to host inititated 
+    uint32_t cycle = 0; // troubleshooting: cycles[n_iter] led to memory issues
     for (size_t i = 0; i < n_iter; i++) {
         size_t index = (i * n_tbs_in_xcd + tbid_in_xcd) * blockDim.x + tid;
         if (tid == 0) {
@@ -112,20 +112,15 @@ __global__ void identify_home(void *data, size_t size, uint32_t **d_cycles, int 
             : "memory", "v0", "v1", "v2", "v3"
         );
         end = __builtin_readcyclecounter();
-        cycles[i] = end - start;
-
-        global_barrier(); // sync globally between iters
-    }
-    global_barrier();
-
-    // every thread block reads 4KB boundary at each iter
-    if (tid == 0) {
-        for (size_t i = 0; i < n_iter; i++) {
-            d_cycles[xcc_id][i * n_tbs_in_xcd + tbid_in_xcd] = cycles[i];
+        cycle = end - start;
+        if (tid == 0) {
+            // every thread block reads chunk boundary at each iter
+            // only tid 0 writes, since we've set tb data per iter == CHUNK_SIZE
+            d_cycles[xcc_id][i * n_tbs_in_xcd + tbid_in_xcd] = cycle;
             #if DEBUG
-            printf("iter %zu tbid_in_xcd %d (bid %d, xcd %d): %u cycles\n", i, tbid_in_xcd, bid, xcc_id, cycles[i]);
+            printf("iter %zu tbid_in_xcd %d (bid %d, xcd %d): %u cycles\n", i, tbid_in_xcd, bid, xcc_id, cycle);
             #endif
         }
+        global_barrier(); // sync globally between iters
     }
-    global_barrier(); // sync global memory writes
 }
