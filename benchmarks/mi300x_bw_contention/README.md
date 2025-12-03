@@ -1,0 +1,1 @@
+n_pages is the most critical knob in these bmks. It's because it decides n_iter, which is the number of iterations that each thread issues a memory load request. If n_iter is too small, the scheduling overhead will dominate the latency of each thread. Currently, it is set to (128 << 8) 64GB. Set to (128) 256MB to fit in LLC when required.  

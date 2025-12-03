@@ -181,8 +181,8 @@ int main() {
     
     /* allocate data */
 
-    const int n_pages = 128; // := 256 MB to fill up LLC
-    const size_t data_size = (n_pages * PAGE_SIZE);
+    const long long n_pages = (128 << 8); // set to 128 (=256 MB) to fit in LLC
+    const long long data_size = (n_pages * PAGE_SIZE);
     const int n_chunks = data_size / CHUNK_SIZE;
     printf("data_size: %d MB, chunk_size: %d KB\n", (int)data_size / (1024 * 1024), CHUNK_SIZE / 1024);
 
@@ -232,12 +232,14 @@ int main() {
 
     /* retrieve and process results */
     
-    uint32_t h_cycles[XCDS_NUM][n_chunks];;
+    vector<vector<uint32_t>> h_cycles(XCDS_NUM, vector<uint32_t>(n_chunks));
+    // uint32_t h_cycles[XCDS_NUM][n_chunks]; // troubleshooting: stack overflow!
     for (int x = 0; x < XCDS_NUM; x++) {
-        gpuErrchk(hipMemcpy(&h_cycles[x][0], d_cycles[x], sizeof(uint32_t) * n_chunks, hipMemcpyDeviceToHost));
+        gpuErrchk(hipMemcpy(h_cycles[x].data(), d_cycles[x], sizeof(uint32_t) * n_chunks, hipMemcpyDeviceToHost));
     }
     
-    int h_home[n_chunks];
+    vector<int> h_home(n_chunks);
+    // int h_home[n_chunks]; // troubleshooting: stack overflow!
     for (size_t i = 0; i < n_chunks; i++) {
         uint32_t min_cycles = 0xFFFFFFFF;
         int min_xcc = -1;
@@ -316,10 +318,11 @@ int main() {
 
     /* retrieve and process results */
 
-    uint32_t h_cycles_start[XCDS_NUM][BPX], h_cycles_stop[XCDS_NUM][BPX];
+    vector<vector<uint32_t>> h_cycles_start(XCDS_NUM, vector<uint32_t>(BPX));
+    vector<vector<uint32_t>> h_cycles_stop(XCDS_NUM, vector<uint32_t>(BPX));
     for (int x = 0; x < XCDS_NUM; x++) {
-        gpuErrchk(hipMemcpy(&h_cycles_start[x][0], d_cycles_start[x], sizeof(uint32_t) * BPX, hipMemcpyDeviceToHost));
-        gpuErrchk(hipMemcpy(&h_cycles_stop[x][0], d_cycles_stop[x], sizeof(uint32_t) * BPX, hipMemcpyDeviceToHost));
+        gpuErrchk(hipMemcpy(h_cycles_start[x].data(), d_cycles_start[x], sizeof(uint32_t) * BPX, hipMemcpyDeviceToHost));
+        gpuErrchk(hipMemcpy(h_cycles_stop[x].data(), d_cycles_stop[x], sizeof(uint32_t) * BPX, hipMemcpyDeviceToHost));
     }
 
     for (int xcd = 0; xcd < XCDS_NUM; xcd++) {
