@@ -1,4 +1,5 @@
-// extension of mi300x_mapping/bmk1 to multiple thread blocks per xcd
+// bmk1_ntbx is deprecated since large #tbs per xcd cause scheduling/mlp overhead issues.
+// this bmk use only 1 tb per xcd and cooperative group api for sync across tbs
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -6,15 +7,9 @@
 #include <vector>
 #include <hip/hip_runtime.h>
 
-#include "bmk1_ntbx.h"
+#include "bmk1_1tbx.h"
 
-#ifndef TPX
-#define TPX 1 // thread blocks per xcd
-#endif
-
-#ifndef XCDS_NUM
-#define XCDS_NUM 8 // num xcds in mi300x
-#endif
+using namespace std;
 
 // GPU error check
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
@@ -25,13 +20,21 @@ inline void gpuAssert(hipError_t code, const char *file, int line, bool abort=tr
     }
 }
 
+#ifndef XCDS_NUM
+#define XCDS_NUM 8 // num xcds in mi300x
+#endif
+
 constexpr int PAGE_SIZE = (2 * 1024 * 1024); // 2MB huge page
 constexpr int CHUNK_SIZE = (2 * 1024); // 2KB/4KB chunk size
+constexpr int N_PAGES = (256); // you can change
 
-constexpr int THREADS_PER_WARP = 64;
+constexpr int THREADS_PER_WARP = (64);
 constexpr int WARPS_PER_BLOCK = (CHUNK_SIZE / (16 * THREADS_PER_WARP)); // one block per chunk
+constexpr int TPX = (1); // thread blocks per xcd
 
-#define DEBUG 0
+#ifndef DEBUG
+#define DEBUG 1
+#endif
 
 int main() {
 
@@ -42,9 +45,8 @@ int main() {
     const int total_threads = (n_blocks * n_threads_per_block);
     printf("n_xcds: %d, n_blocks: %d, n_blocks_per_xcd: %d, n_warps_per_block: %d, n_threads_per_warp: %d\n", XCDS_NUM, n_blocks, TPX, WARPS_PER_BLOCK, THREADS_PER_WARP);
 
-    const int n_pages = 128; // := 256 MB to fill up LLC
-    const size_t data_size = (n_pages * PAGE_SIZE); 
-    printf("data_size: %d MB\n", (int)data_size / (1024 * 1024));
+    const long long data_size = ((long long)N_PAGES * PAGE_SIZE); 
+    printf("data size: %lld MB\n", data_size / (1024 * 1024));
 
     /* allocate data */
 
@@ -90,21 +92,33 @@ int main() {
     
     /* launch kernel */
 
-    hipLaunchKernelGGL(
+    void *kernel_args[] = {
+        (void*)&d_data,
+        (void*)&data_size,
+        (void*)&d_cycles,
+        (void*)&d_home
+    };
+
+    gpuErrchk(hipLaunchCooperativeKernel(
         identify_home,
         dim3(n_blocks), dim3(n_threads_per_block), 
-        0, stream,
-        (void*)d_data, data_size, d_cycles, d_home
-    );
+        kernel_args, 0, stream
+    ));
     gpuErrchk(hipDeviceSynchronize());
 
     /* retrieve and process results */
-    uint32_t h_cycles[XCDS_NUM][data_size / CHUNK_SIZE];
+
+    vector<vector<uint32_t>> h_cycles(XCDS_NUM, vector<uint32_t>(data_size / CHUNK_SIZE));
     for (int x = 0; x < XCDS_NUM; x++) {
-        gpuErrchk(hipMemcpy(&h_cycles[x][0], d_cycles[x], sizeof(uint32_t) * (data_size / CHUNK_SIZE), hipMemcpyDeviceToHost));
+        gpuErrchk(hipMemcpy(
+            h_cycles[x].data(), 
+            d_cycles[x], 
+            sizeof(uint32_t) * (data_size / CHUNK_SIZE), 
+            hipMemcpyDeviceToHost
+        ));
     }
     
-    int h_home[data_size / CHUNK_SIZE];
+    vector<int> h_home(data_size / CHUNK_SIZE);
     for (size_t i = 0; i < (data_size / CHUNK_SIZE); i++) {
         uint32_t min_cycles = 0xFFFFFFFF;
         int min_xcc = -1;

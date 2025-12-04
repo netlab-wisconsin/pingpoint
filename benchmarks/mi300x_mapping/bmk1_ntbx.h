@@ -98,7 +98,7 @@ __global__ void identify_home(void *data, size_t size, uint32_t **d_cycles, int 
         size_t index = (i * n_tbs_in_xcd + tbid_in_xcd) * blockDim.x + tid;
         if (tid == 0) {
             #if DEBUG
-            printf("[warmup] (iter:%zu, bid:%d, tbid_xcd:%d) accessing data_u4[%zu..%zu]\n", i, bid, tbid_in_xcd, index, index + blockDim.x - 1);
+            printf("[actual] (iter:%zu, bid:%d, tbid_xcd:%d) accessing data_u4[%zu..%zu]\n", i, bid, tbid_in_xcd, index, index + blockDim.x - 1);
             #endif
         }
         start = __builtin_readcyclecounter();

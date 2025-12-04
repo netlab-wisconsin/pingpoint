@@ -266,7 +266,7 @@ int main() {
     /* group per-xcd 4KB chunk pointers */
     
     vector<vector<uint64_t>> xcd_chunks(XCDS_NUM);
-    for (size_t i = 0; i < n_4KB_chunks; i++) {
+    for (size_t i = 0; i < n_chunks; i++) {
         xcd_chunks[h_home[i]].push_back(reinterpret_cast<uint64_t>(d_data) + i * (CHUNK_SIZE));
     }
 
