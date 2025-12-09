@@ -58,13 +58,16 @@ __global__ void l1_lat(uint32_t *startClk, uint32_t *stopClk, uint64_t *posArray
 
     /* Warmup L1 cache */
 
-    // tid=0 initialize the circular pointer-chasing array
+    // thread 0 initializes the pointer-chasing array
+    // pointer chasing stride is warp_size. e.g., p[0]->p[64*stride], p[1]->p[1+64*stride], ...
     if (tid == 0) {
-        uint32_t i = 0;
-        for (; i<posArraySize-1; i++) {
-            posArray[i] = (uint64_t)(posArray + i + 1);
+    const uint32_t stride = THREADS_PER_WARP * STRIDE;
+        for (uint32_t i = 0; i<posArraySize - stride; i++) {
+            posArray[i] = (uint64_t)(posArray + i + stride);
         }
-        posArray[i] = (uint64_t)posArray;
+        for (uint32_t i = posArraySize - stride; i<posArraySize; i++) {
+            posArray[i] = (uint64_t)(posArray + (i - (posArraySize - stride)));
+        }
     }
     asm volatile ("s_barrier"); // synchronize all threads
 
@@ -74,7 +77,10 @@ __global__ void l1_lat(uint32_t *startClk, uint32_t *stopClk, uint64_t *posArray
 
     // each adjacent thread starts from strided elements
     // this disables coalescing at TA
-    uint64_t *ptr = posArray + ((wid * THREADS_PER_WARP * stride) + (wtid * stride) % posArraySize);
+    uint64_t *ptr = posArray + ((wid * THREADS_PER_WARP * stride) + (wtid * stride)) % posArraySize;
+    #if LOG_LEVEL >= 2
+    printf("wid %d wtid %d: start ptr_idx %d\n", wid, wtid, 0 + ((wid * THREADS_PER_WARP * stride) + (wtid * stride)) % posArraySize);
+    #endif
     uint64_t ptr1, ptr0;
 
     asm volatile (
