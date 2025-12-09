@@ -25,8 +25,9 @@ inline void gpuAssert(hipError_t code, const char *file, int line, bool abort=tr
 #endif
 
 constexpr int PAGE_SIZE = (2 * 1024 * 1024); // 2MB huge page
-constexpr int CHUNK_SIZE = (2 * 1024); // 2KB/4KB chunk size
-constexpr int N_PAGES = (256); // you can change
+constexpr int CHUNK_SIZE = (2 * 1024); // 2KB
+// constexpr int CHUNK_SIZE = (4 * 1024); // 4KB chunk size
+constexpr int N_PAGES = (128); // you can change
 
 constexpr int THREADS_PER_WARP = (64);
 constexpr int WARPS_PER_BLOCK = (CHUNK_SIZE / (16 * THREADS_PER_WARP)); // one block per chunk
@@ -128,6 +129,9 @@ int main() {
                 min_cycles = c;
                 min_xcc = xcc;
             }
+            #if DEBUG
+            printf("chunk[%zu] xcd %d: cycles %u\n", i, xcc, c);
+            #endif
         }
         h_home[i] = min_xcc;
         printf("chunk[%zu]: home xcd %d\n", i, h_home[i]);

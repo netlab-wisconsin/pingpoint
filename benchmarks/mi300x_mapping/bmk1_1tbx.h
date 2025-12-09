@@ -59,8 +59,9 @@ __global__ void identify_home(void *data, size_t size, uint32_t **d_cycles, int 
     // for this bmk, assert 1 tb per xcd
     assert(n_tbs_in_xcd * XCDS_NUM == gridDim.x); assert(n_tbs_in_xcd == 1);
 
-    // for this bmk, assert 128 threads per block
+    // for this bmk, assert 256 threads per block if chunk size is 4KB (128 for 2KB)
     assert(blockDim.x == 128);
+    // assert(blockDim.x == 256);
 
     // for this bmk, both global_barrier and cooperative_groups are supported
     #if not USE_GLOBAL_BARRIER
@@ -86,8 +87,9 @@ __global__ void identify_home(void *data, size_t size, uint32_t **d_cycles, int 
         printf("working set per xcd: %.2f MB\n", (n_16Bs * sizeof(uint4) / XCDS_NUM) / (1024.0 * 1024.0));
     }
 
-    const size_t n_outer = (size / (32 * 1024 * 1024)); // 32MB per outer loop
-    const size_t n_inner = (32 * 1024 * 1024) / (16 * blockDim.x); // num of accesses per tb in inner loop
+    const size_t inner_size = 64 * 1024 * 1024; // 64MB per inner loop (given TLB lat jump at 64MB)
+    const size_t n_outer = size / inner_size;
+    const size_t n_inner = inner_size / (16 * blockDim.x); // num of accesses per tb in inner loop
     assert (n_iter == n_outer * n_inner);
     
     for (size_t i = 0; i < n_outer; i++) {
