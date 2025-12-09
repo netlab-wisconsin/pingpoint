@@ -1,0 +1,43 @@
+BASE_DIR := $(shell pwd)
+BIN_DIR  := $(BASE_DIR)/bin
+
+HIPOPTS  = --amdgpu-target=gfx942
+HIP_PATH = /opt/rocm-7.1.0
+CC       := $(HIP_PATH)/bin/hipcc
+
+REPEAT_TIMES := 4096
+WARPS        := 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16
+STRIDES      := 8
+
+L1_LAT_UNCOALESCED_SRC := l1_lat_uncoalesced.cpp
+
+# l1_lat_uncoal_w_<w>_s_<s>_r_<r>
+L1_LAT_UNCOALESCED_TARGETS := \
+  $(foreach w,$(WARPS), \
+    $(foreach s,$(STRIDES), \
+      $(foreach r,$(REPEAT_TIMES), \
+        l1_lat_uncoal_w_$(w)_s_$(s)_r_$(r))))
+
+L1_LAT_UNCOALESCED_BINARIES := $(addprefix $(BIN_DIR)/,$(L1_LAT_UNCOALESCED_TARGETS))
+
+.PHONY: all clean
+
+all: $(BIN_DIR) $(L1_LAT_UNCOALESCED_BINARIES)
+
+$(BIN_DIR):
+	mkdir -p $@
+
+# Template to generate one rule per (w,s,r) triple
+define GEN_L1_LAT_UNCOALESCED_RULE
+$(BIN_DIR)/l1_lat_uncoal_w_$(1)_s_$(2)_r_$(3): $(L1_LAT_UNCOALESCED_SRC) | $(BIN_DIR)
+	$$(CC) $$(HIPOPTS) -DWARPS_PER_BLOCK=$(1) -DSTRIDE=$(2) -DREPEAT_TIMES=$(3) $$< -o $$@
+endef
+
+# Instantiate rules for all combinations
+$(foreach w,$(WARPS), \
+  $(foreach s,$(STRIDES), \
+    $(foreach r,$(REPEAT_TIMES), \
+      $(eval $(call GEN_L1_LAT_UNCOALESCED_RULE,$(w),$(s),$(r))))))
+
+clean:
+	rm -f $(L1_LAT_UNCOALESCED_BINARIES)
