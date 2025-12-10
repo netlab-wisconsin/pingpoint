@@ -59,7 +59,7 @@ __global__ void l1_lat(uint32_t *startClk, uint32_t *stopClk, uint64_t *posArray
     // thread 0 initializes the pointer-chasing array
     // pointer chasing stride is warp_size. e.g., p[0]->p[64], p[1]->p[65], ...
     if (tid == 0) {
-    const uint32_t stride = THREADS_PER_WARP;
+        const uint32_t stride = THREADS_PER_WARP;
         for (uint32_t i = 0; i<posArraySize - stride; i++) {
             posArray[i] = (uint64_t)(posArray + i + stride);
         }
@@ -88,7 +88,7 @@ __global__ void l1_lat(uint32_t *startClk, uint32_t *stopClk, uint64_t *posArray
     start = __builtin_readcyclecounter();
     asm volatile("s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t"); // per ISA manual, need waitcnt after S_MEMTIME
     
-    // a thread loads 1 64bit element per iteration, strided by warp size across iterations
+    // a thread loads 1 64bit element per iteration
     for(uint32_t i=0; i<REPEAT_TIMES; ++i) {
         asm volatile (
             "flat_load_dwordx2 %0, %1\n\t"

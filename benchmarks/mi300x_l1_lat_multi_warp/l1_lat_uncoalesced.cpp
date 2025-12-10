@@ -61,7 +61,7 @@ __global__ void l1_lat(uint32_t *startClk, uint32_t *stopClk, uint64_t *posArray
     // thread 0 initializes the pointer-chasing array
     // pointer chasing stride is warp_size. e.g., p[0]->p[64*stride], p[1]->p[1+64*stride], ...
     if (tid == 0) {
-    const uint32_t stride = THREADS_PER_WARP * STRIDE;
+        const uint32_t stride = THREADS_PER_WARP * STRIDE;
         for (uint32_t i = 0; i<posArraySize - stride; i++) {
             posArray[i] = (uint64_t)(posArray + i + stride);
         }
