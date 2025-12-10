@@ -10,13 +10,16 @@ SRC := l2_lat_coalesced.cpp
 # Parameter lists
 BLOCKS   := $(shell seq 8 8 128)
 WARPS    := $(shell seq 1 16)
+STRIDE   := 2 4 8 16
 REPEATS  := 4096 8192
 
 # Construct output filenames
 ALL_BINS := $(foreach b,$(BLOCKS), \
               $(foreach w,$(WARPS), \
-                $(foreach r,$(REPEATS), \
-                  $(BIN_DIR)/l2_lat_coal_b_$(b)_w_$(w)_r_$(r) \
+                $(foreach s,$(STRIDE), \
+                  $(foreach r,$(REPEATS), \
+                    $(BIN_DIR)/l2_lat_coal_b_$(b)_w_$(w)_s_$(s)_r_$(r) \
+                  ) \
                 ) \
               ) \
             )
@@ -26,11 +29,12 @@ all: $(ALL_BINS)
 $(BIN_DIR)/l2_lat_coal_b_%: $(SRC)
 	@stem="$*"; \
 	set -- $${stem//_/ }; \
-	b=$$1; w=$$3; r=$$5; \
-	echo "Compiling BLOCKS_NUM=$$b WARPS_PER_BLOCK=$$w REPEAT_TIMES=$$r → $@"; \
+	b=$$1; w=$$3; s=$$5; r=$$7; \
+	echo "Compiling BLOCKS_NUM=$$b WARPS_PER_BLOCK=$$w STRIDE=$$s REPEAT_TIMES=$$r → $@"; \
 	$(CC) $(HIPOPTS) \
 	      -DBLOCKS_NUM=$$b \
 	      -DWARPS_PER_BLOCK=$$w \
+	      -DSTRIDE=$$s \
 	      -DREPEAT_TIMES=$$r \
 	      $< -o $@
 

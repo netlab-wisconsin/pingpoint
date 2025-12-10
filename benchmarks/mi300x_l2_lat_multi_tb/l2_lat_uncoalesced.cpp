@@ -20,6 +20,9 @@ namespace cg = cooperative_groups;
 #ifndef REPEAT_TIMES
 #define REPEAT_TIMES 4096
 #endif
+#ifndef STRIDE
+#define STRIDE 64
+#endif
 
 /* don't change */
 #define THREADS_PER_WARP 64
@@ -47,7 +50,7 @@ __global__ void init_array(uint64_t *posArray, uint32_t posArraySize)
     const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     assert (tid == 0);
 
-    const uint32_t stride = (THREADS_PER_WARP * WARPS_PER_BLOCK * BLOCKS_PER_XCD); 
+    const uint32_t stride = (STRIDE * THREADS_PER_WARP * WARPS_PER_BLOCK * BLOCKS_PER_XCD); 
     for (uint32_t i = 0; i<posArraySize - stride; i++) {
         posArray[i] = (uint64_t)(posArray + i + stride);
     }
@@ -56,7 +59,7 @@ __global__ void init_array(uint64_t *posArray, uint32_t posArraySize)
     }
 }
 
-__global__ void l2_lat(uint32_t *startClk, uint32_t *stopClk, uint64_t *posArray, uint32_t posArraySize)
+__global__ void l2_lat(uint32_t *startClk, uint32_t *stopClk, uint64_t *posArray, uint32_t posArraySize, uint32_t stride)
 {
     const int bid = blockIdx.x;
     const uint32_t wid = (threadIdx.x / THREADS_PER_WARP);
@@ -103,13 +106,13 @@ __global__ void l2_lat(uint32_t *startClk, uint32_t *stopClk, uint64_t *posArray
 
     /* Repeat L2 cache access */
 
-    // each adjacent thread starts from adjacent elements
-    // this enables coalescing at TA
-    uint64_t *ptr = posArray + (tbid_in_xcd * THREADS_PER_BLOCK) + tid;
+    // each adjacent thread starts from strided elements
+    // this disables coalescing at TA
+    uint64_t *ptr = posArray + ((tbid_in_xcd * THREADS_PER_BLOCK * stride) + (tid * stride)) % posArraySize;
     uint64_t ptr1, ptr0;
 
     #if LOG_LEVEL >= 2
-    printf("bid %d wid %d wtid %d: start ptr_idx: %d\n", bid, wid, wtid, 0 + (tbid_in_xcd * THREADS_PER_BLOCK) + tid);
+    printf("wid %d wtid %d: start ptr_idx %d\n", wid, wtid, 0 + ((tbid_in_xcd * THREADS_PER_BLOCK * stride) + (tid * stride)) % posArraySize);
     #endif
 
     asm volatile (
@@ -121,8 +124,8 @@ __global__ void l2_lat(uint32_t *startClk, uint32_t *stopClk, uint64_t *posArray
     uint32_t start = 0;
     start = __builtin_readcyclecounter();
     asm volatile("s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t"); // per ISA manual, need waitcnt after S_MEMTIME
-    
-    // a thread loads 1 64bit element per iteration
+
+    // a thread loads 1 64bit element per iteration, strided by "1" across iterations
     for(uint32_t i=0; i<REPEAT_TIMES; ++i) {
         asm volatile (
             "flat_load_dwordx2 %0, %1\n\t"
@@ -135,17 +138,15 @@ __global__ void l2_lat(uint32_t *startClk, uint32_t *stopClk, uint64_t *posArray
     uint32_t stop = 0;
     stop = __builtin_readcyclecounter();
     asm volatile("s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t"); // per ISA manual, need waitcnt after S_MEMTIME */
-
-    /* >8 End L2 cache access. */
-
+    
     // write time and data back to memory
     startClk[uid] = start;
     stopClk[uid] = stop;
 }
 
 int main(){
-    printf("multi warp coalesced pchase: n_blocks=%d, n_warps=%d, array_size=%d, repeat=%d\n", BLOCKS_NUM, WARPS_PER_BLOCK, ARRAY_SIZE, REPEAT_TIMES);
-    assert (ARRAY_SIZE <= L2_SIZE); // ensure all arrays fit in L1
+    printf("multi warp uncoalesced pchase: n_warps=%d, array_size=%d, repeat=%d, stride=%d\n", WARPS_PER_BLOCK, ARRAY_SIZE, REPEAT_TIMES, STRIDE);
+    assert (ARRAY_SIZE <= L2_SIZE); // ensure all arrays fit in L2
 
     uint32_t *startClk = (uint32_t*) malloc(TOTAL_THREADS*sizeof(uint32_t));
     uint32_t *stopClk = (uint32_t*) malloc(TOTAL_THREADS*sizeof(uint32_t));
@@ -168,11 +169,13 @@ int main(){
 
     // launch kernel
     const uint32_t posArraySize_g = ARRAY_SIZE;
+    const uint32_t stride = STRIDE;
     void *kernel_args[] = {
         (void *)&startClk_g,
         (void *)&stopClk_g,
         (void *)&posArray_g,
-        (void *)&posArraySize_g
+        (void *)&posArraySize_g,
+        (void *)&stride
     };
 
     gpuErrchk(hipLaunchCooperativeKernel(
@@ -182,6 +185,7 @@ int main(){
     ))
     gpuErrchk( hipPeekAtLastError() );
     gpuErrchk( hipDeviceSynchronize() );
+
 
     gpuErrchk( hipMemcpy(startClk, startClk_g, TOTAL_THREADS*sizeof(uint32_t), hipMemcpyDeviceToHost) );
     gpuErrchk( hipMemcpy(stopClk, stopClk_g, TOTAL_THREADS*sizeof(uint32_t), hipMemcpyDeviceToHost) );
