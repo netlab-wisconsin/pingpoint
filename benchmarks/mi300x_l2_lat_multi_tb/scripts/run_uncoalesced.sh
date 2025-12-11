@@ -1,7 +1,7 @@
 #!/bin/bash
 
 BIN_DIR="./bin"
-OUT_DIR="./results/1209_uncoalesced"
+OUT_DIR="./results/1210_uncoalesced"
 
 mkdir -p "$OUT_DIR"
 
@@ -15,8 +15,8 @@ for b in $BLOCKS; do
     for s in $STRIDES; do
       for r in $REPEATS; do
 
-        exe="${BIN_DIR}/l2_lat_coal_b_${b}_w_${w}_s_${s}_r_${r}"
-        out="${OUT_DIR}/l2_lat_coal_b_${b}_w_${w}_s_${s}_r_${r}.out"
+        exe="${BIN_DIR}/l2_lat_uncoal_b_${b}_w_${w}_s_${s}_r_${r}"
+        out="${OUT_DIR}/l2_lat_uncoal_b_${b}_w_${w}_s_${s}_r_${r}.out"
 
         if [[ -x "$exe" ]]; then
           echo "Running BLOCKS=$b WARPS=$w STRIDE=$s REPEAT=$r"

@@ -5,7 +5,7 @@ HIPOPTS  = --amdgpu-target=gfx942
 HIP_PATH = /opt/rocm-7.1.0
 CC       := $(HIP_PATH)/bin/hipcc
 
-SRC := l2_lat_coalesced.cpp
+SRC := l2_lat_uncoalesced.cpp
 
 # Parameter lists
 BLOCKS   := $(shell seq 8 8 128)
@@ -18,7 +18,7 @@ ALL_BINS := $(foreach b,$(BLOCKS), \
               $(foreach w,$(WARPS), \
                 $(foreach s,$(STRIDE), \
                   $(foreach r,$(REPEATS), \
-                    $(BIN_DIR)/l2_lat_coal_b_$(b)_w_$(w)_s_$(s)_r_$(r) \
+                    $(BIN_DIR)/l2_lat_uncoal_b_$(b)_w_$(w)_s_$(s)_r_$(r) \
                   ) \
                 ) \
               ) \
@@ -26,7 +26,7 @@ ALL_BINS := $(foreach b,$(BLOCKS), \
 
 all: $(ALL_BINS)
 
-$(BIN_DIR)/l2_lat_coal_b_%: $(SRC)
+$(BIN_DIR)/l2_lat_uncoal_b_%: $(SRC)
 	@stem="$*"; \
 	set -- $${stem//_/ }; \
 	b=$$1; w=$$3; s=$$5; r=$$7; \
