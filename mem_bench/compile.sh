@@ -1,0 +1,4 @@
+mkdir -p bin
+hipcc -std=c++20 -I/opt/rocm/include/rocprofiler/ -I/opt/rocm/hsa/include/hsa -L/opt/rocm/rocprofiler/lib -lrocprofiler64 -lrocprofiler64v2 -lhsa-runtime64 -lrocm_smi64 -ldl gpu-cache/main.hip   -o bin/gpu-cache
+hipcc -std=c++20 -I/opt/rocm/include/rocprofiler/ -I/opt/rocm/hsa/include/hsa -L/opt/rocm/rocprofiler/lib -lrocprofiler64 -lrocprofiler64v2 -lhsa-runtime64 -lrocm_smi64 -ldl gpu-latency/main.hip -o bin/gpu-latency
+hipcc -std=c++20 -I/opt/rocm/include/rocprofiler/ -I/opt/rocm/hsa/include/hsa -L/opt/rocm/rocprofiler/lib -lrocprofiler64 -lrocprofiler64v2 -lhsa-runtime64 -lrocm_smi64 -ldl gpu-stream/main.hip  -o bin/gpu-stream

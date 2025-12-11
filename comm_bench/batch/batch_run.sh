@@ -1,0 +1,4 @@
+./run_workload_monitor.sh "./amd_mi300x_power_clock_temp.sh 1 transferbench_128MB.csv" "./amd_mi300x_hbm3.sh 1 transferbench_128MB.csv" "./amd_mi300x_xgmi.sh 1 transferbench_128MB.csv" "./run_test.sh 134217728"
+./run_workload_monitor.sh "./amd_mi300x_power_clock_temp.sh 1 transferbench_1GB.csv"   "./amd_mi300x_hbm3.sh 1 transferbench_1GB.csv"   "./amd_mi300x_xgmi.sh 1 transferbench_1GB.csv"   "./run_test.sh 1073741824"
+./run_workload_monitor.sh "./amd_mi300x_power_clock_temp.sh 1 transferbench_8GB.csv"   "./amd_mi300x_hbm3.sh 1 transferbench_8GB.csv"   "./amd_mi300x_xgmi.sh 1 transferbench_8GB.csv"   "./run_test.sh 8589934592"
+./run_workload_monitor.sh "./amd_mi300x_power_clock_temp.sh 1 transferbench_64GB.csv"  "./amd_mi300x_hbm3.sh 1 transferbench_64GB.csv"  "./amd_mi300x_xgmi.sh 1 transferbench_64GB.csv"  "./run_test.sh 68719476736"

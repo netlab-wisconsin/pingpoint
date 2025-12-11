@@ -1,0 +1,3 @@
+./run_workload_monitor.sh "./amd_mi300x_power_clock_temp.sh 0 1 gpu-cache"      "./amd_mi300x_hbm3.sh 0 1 gpu-cache"     "./run_test.sh ../bin/gpu-cache"
+./run_workload_monitor.sh "./amd_mi300x_power_clock_temp.sh 0 1 gpu-latency"    "./amd_mi300x_hbm3.sh 0 1 gpu-latency"   "./run_test.sh ../bin/gpu-latency"
+./run_workload_monitor.sh "./amd_mi300x_power_clock_temp.sh 0 1 gpu-stream"     "./amd_mi300x_hbm3.sh 0 1 gpu-stream"    "./run_test.sh ../bin/gpu-stream"
