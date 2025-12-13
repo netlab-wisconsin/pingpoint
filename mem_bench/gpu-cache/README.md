@@ -1,0 +1,1 @@
+Measures achievable BW from a single CU (1 threadblock with size 512) by scaling working set size ("dataset per CU") to reveal achievable BW from different cache levels. Provides extrapolated system BW estimation by (single CU result) * (CU count). 

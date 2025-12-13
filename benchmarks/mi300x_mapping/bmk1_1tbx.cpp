@@ -47,6 +47,7 @@ int main() {
     printf("n_xcds: %d, n_blocks: %d, n_blocks_per_xcd: %d, n_warps_per_block: %d, n_threads_per_warp: %d\n", XCDS_NUM, n_blocks, TPX, WARPS_PER_BLOCK, THREADS_PER_WARP);
 
     const long long data_size = ((long long)N_PAGES * PAGE_SIZE); 
+    const int n_chunks = (data_size / CHUNK_SIZE);
     printf("data size: %lld MB\n", data_size / (1024 * 1024));
 
     /* allocate data */
@@ -57,15 +58,9 @@ int main() {
 
     /* allocate cycles array */
 
-    uint32_t **d_cycles; // per-xcd, per-chunk cycles array
-    gpuErrchk(hipMalloc((void**)&d_cycles, sizeof(uint32_t*) * XCDS_NUM));
-    for (int x = 0; x < XCDS_NUM; x++) {
-        gpuErrchk(hipMalloc((void**)&d_cycles[x], sizeof(uint32_t) * (data_size / CHUNK_SIZE) ));
-    }
-    printf("allocated d_cycles array[%d][%d]\n", XCDS_NUM, (int)data_size / CHUNK_SIZE);
-
-    int *d_home; // home 'xcc' per chunk 
-    gpuErrchk(hipMalloc((void**)&d_home, sizeof(int) * (data_size / CHUNK_SIZE) ));
+    uint32_t *d_cycles; // per-xcd, per-chunk cycles array
+    gpuErrchk(hipMalloc((void**)&d_cycles, sizeof(uint32_t) * XCDS_NUM * n_chunks ));
+    printf("allocated d_cycles array[%d][%d]\n", XCDS_NUM, n_chunks);
 
     /* create cu masked stream */
 
@@ -97,7 +92,7 @@ int main() {
         (void*)&d_data,
         (void*)&data_size,
         (void*)&d_cycles,
-        (void*)&d_home
+        (void*)&n_chunks
     };
 
     gpuErrchk(hipLaunchCooperativeKernel(
@@ -109,22 +104,22 @@ int main() {
 
     /* retrieve and process results */
 
-    vector<vector<uint32_t>> h_cycles(XCDS_NUM, vector<uint32_t>(data_size / CHUNK_SIZE));
-    for (int x = 0; x < XCDS_NUM; x++) {
-        gpuErrchk(hipMemcpy(
-            h_cycles[x].data(), 
-            d_cycles[x], 
-            sizeof(uint32_t) * (data_size / CHUNK_SIZE), 
-            hipMemcpyDeviceToHost
-        ));
-    }
+    uint32_t *h_cycles;
+    h_cycles = (uint32_t*)malloc(sizeof(uint32_t) * XCDS_NUM * n_chunks);
+    gpuErrchk(hipMemcpy(
+        h_cycles, 
+        d_cycles, 
+        sizeof(uint32_t) * XCDS_NUM * n_chunks, 
+        hipMemcpyDeviceToHost
+    ));
     
-    vector<int> h_home(data_size / CHUNK_SIZE);
-    for (size_t i = 0; i < (data_size / CHUNK_SIZE); i++) {
+    vector<int> h_home(n_chunks);
+    for (size_t i = 0; i < n_chunks; i++) {
         uint32_t min_cycles = 0xFFFFFFFF;
         int min_xcc = -1;
         for (int xcc = 0; xcc < XCDS_NUM; xcc++) {
-            uint32_t c = h_cycles[xcc][i];
+            // uint32_t c = h_cycles[xcc][i];
+            uint32_t c = h_cycles[xcc * n_chunks + i];
             if (c < min_cycles) {
                 min_cycles = c;
                 min_xcc = xcc;
@@ -140,6 +135,7 @@ int main() {
     /* cleanup */
 
     gpuErrchk(hipFree(d_data));
+    gpuErrchk(hipFree(d_cycles));
 
     return 0;
 }

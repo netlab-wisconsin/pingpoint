@@ -42,7 +42,8 @@ void global_barrier()
     __syncthreads(); // Ensure all threads in this block observe the sense change before proceeding
 }
 
-__global__ void identify_home(void *data, size_t size, uint32_t **d_cycles, int *d_home) {
+// note: 12/13 convert to 1d c_cycles and calculate index with n_chunks.
+__global__ void identify_home(void *data, size_t size, uint32_t *d_cycles, int n_chunks) {
     int bid = blockIdx.x;
     int tid = threadIdx.x;
     int uid = bid * blockDim.x + tid;
@@ -134,7 +135,8 @@ __global__ void identify_home(void *data, size_t size, uint32_t **d_cycles, int 
             uint32_t end = __builtin_readcyclecounter();
             uint32_t cycle = end - start;
             if (tid == 0) {
-                d_cycles[xcc_id][(i * n_inner + j) * n_tbs_in_xcd + tbid_in_xcd] = cycle;
+                const int d_cycles_index = xcc_id * n_chunks + (i * n_inner + j) * n_tbs_in_xcd + tbid_in_xcd;
+                d_cycles[d_cycles_index] = cycle;
                 #if DEBUG
                 printf("outer %zu inner %zu tbid_in_xcd %d (bid %d, xcd %d): %u cycles\n", i, j, tbid_in_xcd, bid, xcc_id, cycle);
                 #endif

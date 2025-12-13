@@ -1,0 +1,25 @@
+BASE_DIR := $(shell pwd)
+BIN_DIR  := $(BASE_DIR)/bin
+HIP_PATH := /opt/rocm-7.1.0
+CC       := $(HIP_PATH)/bin/hipcc
+HIPOPTS  := --amdgpu-target=gfx942
+
+BPX_MAX  := 275
+
+.PHONY: all clean
+
+all:
+	@for t in $$(seq 1 $(BPX_MAX)); do \
+		cmd="$(CC) $(HIPOPTS) -DBPX=$${t} local.cpp -o $(BIN_DIR)/local_bpx_$${t}"; \
+		echo "$$cmd"; \
+		$$cmd || exit 1; \
+	done; \
+
+local_bpx_%:
+	@t=$*; \
+	 out=$(BIN_DIR)/$@; \
+	 cmd="$(CC) $(HIPOPTS) -DBPX=$$t local.cpp -o $$out"; \
+	 echo "$$cmd"; $$cmd
+
+clean:
+	rm -f $(BIN_DIR)/local_bpx_*

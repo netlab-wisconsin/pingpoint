@@ -1,4 +1,4 @@
-// all xcds generate local iod traffic
+// all xcds generate tornado iod traffic
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +15,10 @@
 
 #ifndef XCDS_NUM
 #define XCDS_NUM 8
+#endif
+
+#ifndef XTO
+#define XTO 2 // xcd tornado offset. 2 = 1 iod hop, 4 = 2 iod hops
 #endif
 
 using namespace std;
@@ -97,15 +101,18 @@ __global__ void k(uint64_t *xcd_chunks1, uint64_t *xcd_chunks2,
     float4 reg_in1, reg_in2, reg_in3, reg_in4;
     float sink0 = 0, sink1 = 0, sink2 = 0, sink3 = 0;
 
+    // set dst as tornado
+    const uint32_t xcd_dst = (xcc_id + XTO) % XCDS_NUM;
+
     // warmup
     // only 1 thread per xcd warms up entirely
     if (tbid_in_xcd == 0 && tid == 0) {
-        for (size_t i = 0; i < xcd_chunks_size[xcc_id]; i++) {
+        for (size_t i = 0; i < xcd_chunks_size[xcd_dst]; i++) {
 
-            float4 *ptr_in1 = reinterpret_cast<float4*>(xcd_chunks1[xcd_chunks_offset1[xcc_id] + i]);
-            float4 *ptr_in2 = reinterpret_cast<float4*>(xcd_chunks2[xcd_chunks_offset2[xcc_id] + i]);
-            float4 *ptr_in3 = reinterpret_cast<float4*>(xcd_chunks3[xcd_chunks_offset3[xcc_id] + i]);
-            float4 *ptr_in4 = reinterpret_cast<float4*>(xcd_chunks4[xcd_chunks_offset4[xcc_id] + i]);
+            float4 *ptr_in1 = reinterpret_cast<float4*>(xcd_chunks1[xcd_chunks_offset1[xcd_dst] + i]);
+            float4 *ptr_in2 = reinterpret_cast<float4*>(xcd_chunks2[xcd_chunks_offset2[xcd_dst] + i]);
+            float4 *ptr_in3 = reinterpret_cast<float4*>(xcd_chunks3[xcd_chunks_offset3[xcd_dst] + i]);
+            float4 *ptr_in4 = reinterpret_cast<float4*>(xcd_chunks4[xcd_chunks_offset4[xcd_dst] + i]);
 
             for (size_t offset = 0; offset < (CHUNK_SIZE / sizeof(float4)); offset++) {
                 asm volatile(
@@ -131,7 +138,7 @@ __global__ void k(uint64_t *xcd_chunks1, uint64_t *xcd_chunks2,
     grid.sync();
 
     // measurement
-    size_t n_iter = xcd_chunks_size[xcc_id] / n_tbs_in_xcd;
+    size_t n_iter = xcd_chunks_size[xcd_dst] / n_tbs_in_xcd;
     if (tid == 0) {
         #if DEBUG
         printf("bid %d (tbid_in_xcd %d) on xcc %d: n_iter %zu\n", bid, tbid_in_xcd, xcc_id, n_iter);
@@ -146,10 +153,10 @@ __global__ void k(uint64_t *xcd_chunks1, uint64_t *xcd_chunks2,
     for (size_t iter = 0; iter < n_iter; iter++) {
         size_t chunk_idx = tbid_in_xcd + iter * n_tbs_in_xcd;
 
-        float4 *ptr_in1 = reinterpret_cast<float4*>(xcd_chunks1[xcd_chunks_offset1[xcc_id] + chunk_idx]);
-        float4 *ptr_in2 = reinterpret_cast<float4*>(xcd_chunks2[xcd_chunks_offset2[xcc_id] + chunk_idx]);
-        float4 *ptr_in3 = reinterpret_cast<float4*>(xcd_chunks3[xcd_chunks_offset3[xcc_id] + chunk_idx]);
-        float4 *ptr_in4 = reinterpret_cast<float4*>(xcd_chunks4[xcd_chunks_offset4[xcc_id] + chunk_idx]);
+        float4 *ptr_in1 = reinterpret_cast<float4*>(xcd_chunks1[xcd_chunks_offset1[xcd_dst] + chunk_idx]);
+        float4 *ptr_in2 = reinterpret_cast<float4*>(xcd_chunks2[xcd_chunks_offset2[xcd_dst] + chunk_idx]);
+        float4 *ptr_in3 = reinterpret_cast<float4*>(xcd_chunks3[xcd_chunks_offset3[xcd_dst] + chunk_idx]);
+        float4 *ptr_in4 = reinterpret_cast<float4*>(xcd_chunks4[xcd_chunks_offset4[xcd_dst] + chunk_idx]);
         
         asm volatile(
             "flat_load_dwordx4 %[OUT_D1],  %[IN_D1]\n\t"
@@ -183,7 +190,20 @@ __global__ void k(uint64_t *xcd_chunks1, uint64_t *xcd_chunks2,
 
 
 int main() {
-    printf("local\n");
+    switch (XTO) {
+        case 2:
+            printf("tornado traffic (1 hop)\n");
+            break;
+        case 4:
+            printf("tornado traffic (2 hops)\n");
+            break;
+        case 6:
+            printf("tornado traffic (3 hops)\n");
+            break;
+        default:
+            printf("invalid XTO %d\n", XTO);
+            exit(1);
+    }
 
     const int n_threads_per_warp = 64;
     const int n_warps_per_block = (CHUNK_SIZE / (n_threads_per_warp * 16)); // set to make each tb load 1 chunk per iter. each thread loads 16B per iter.
@@ -407,6 +427,9 @@ int main() {
         uint32_t min_xcd_cycles_start = 0xFFFFFFFF;
         uint32_t max_xcd_cycles_stop = 0;
 
+        // set dst xcd as tornado
+        const uint32_t xcd_dst = (xcd + XTO) % XCDS_NUM;
+
         for (int tbid_in_xcd = 0; tbid_in_xcd < BPX; tbid_in_xcd++) {
             // incremental avg
             avg_xcd_cycles += ((h_cycles_stop[xcd][tbid_in_xcd] - h_cycles_start[xcd][tbid_in_xcd]) - avg_xcd_cycles) / (tbid_in_xcd + 1);
@@ -424,7 +447,7 @@ int main() {
             {
                 // log per-tb results
                 uint32_t cycles = h_cycles_stop[xcd][tbid_in_xcd] - h_cycles_start[xcd][tbid_in_xcd];
-                double bytes = (double)((xcd_chunks_size[xcd] / BPX) * CHUNK_SIZE * n_datas); // total bytes accessed by this tb
+                double bytes = (double)((xcd_chunks_size[xcd_dst] / BPX) * CHUNK_SIZE * n_datas); // total bytes accessed by this tb
                 double cycles_per_load = (double)cycles / (bytes / n_threads_per_block / 16.0); // per 16B load
                 printf("xcd %d, tb %d: start %u, stop %u, lat(16B) %.2f cycles, bw %.2f GB/s\n", 
                         xcd, tbid_in_xcd, h_cycles_start[xcd][tbid_in_xcd], h_cycles_stop[xcd][tbid_in_xcd], cycles_per_load, (bytes / ((double)cycles / CLOCK)) / 1e9);
@@ -433,7 +456,7 @@ int main() {
         }
 
         // avg. latency (RTT)
-        const double bytes = (double)(xcd_chunks_size[xcd] * CHUNK_SIZE * n_datas); // total bytes accessed by this xcd
+        const double bytes = (double)(xcd_chunks_size[xcd_dst] * CHUNK_SIZE * n_datas); // total bytes accessed by this xcd
         const double lat_cycles_16B = avg_xcd_cycles / (bytes / (n_threads_per_block * BPX) / 16.0);  // avg cycles per 16B load
         printf("xcd %d: avg lat(16B) %.2f cycles\n", xcd, lat_cycles_16B);
 
@@ -453,7 +476,7 @@ int main() {
             for (int tbid_in_xcd = 0; tbid_in_xcd < BPX; tbid_in_xcd++) {
                 if ( (t >= h_cycles_start[xcd][tbid_in_xcd]) && (t < h_cycles_stop[xcd][tbid_in_xcd]) ) {
                     // increment bytes by the approx. proportion loaded in this window
-                    double bytes_contrib = (double)((xcd_chunks_size[xcd] / BPX) * CHUNK_SIZE * n_datas) * \
+                    double bytes_contrib = (double)((xcd_chunks_size[xcd_dst] / BPX) * CHUNK_SIZE * n_datas) * \
                                         (window / (h_cycles_stop[xcd][tbid_in_xcd] - h_cycles_start[xcd][tbid_in_xcd]));
                     window_bytes += bytes_contrib;
                 }
