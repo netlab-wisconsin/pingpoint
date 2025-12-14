@@ -200,10 +200,10 @@ int main() {
 
     const int n_datas = 4;
 
-    const long long n_pages = (128 << 7); // 32GB per input data
+    const long long n_pages = (128 << 6); // 16GB per input data
     // const long long n_pages = 128; // 256MB per input data
     const long long data_size = (n_pages * PAGE_SIZE);
-    const int n_chunks = data_size / CHUNK_SIZE;
+    const size_t n_chunks = data_size / CHUNK_SIZE;
     printf("n_datas: %d, data_size: %lld MB, chunk_size: %d KB\n", n_datas, data_size / (1024 * 1024), CHUNK_SIZE / 1024);
 
     vector<char*> d_data(n_datas);
@@ -219,7 +219,7 @@ int main() {
     vector<uint32_t*> d_cycles(n_datas); 
     for (int i = 0; i < n_datas; i++) {
         gpuErrchk(hipMalloc((void**)&d_cycles[i], sizeof(uint32_t) * XCDS_NUM * n_chunks ));
-        printf("allocated d_cycles[%d] array[%d][%d]\n", i, XCDS_NUM, n_chunks);
+        printf("allocated d_cycles[%d] array[%d][%zu]\n", i, XCDS_NUM, n_chunks);
     }
 
     /* create cu masked stream */
