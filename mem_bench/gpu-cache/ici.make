@@ -11,10 +11,30 @@ LDFLAGS 	:= -L$(HIP_HOME)/rocprofiler/lib -lrocprofiler64 -lhsa-runtime64 -lrocm
 NAME 		:= cache
 PREFIX		:= ici
 
-all: $(BIN_DIR)/$(PREFIX)-hip-$(NAME)
+all: $(BIN_DIR)/$(PREFIX)-$(NAME)-hop0 \
+	$(BIN_DIR)/$(PREFIX)-$(NAME)-hop1 \
+	$(BIN_DIR)/$(PREFIX)-$(NAME)-hop2 \
+	$(BIN_DIR)/$(PREFIX)-$(NAME)-hop3 \
+	$(BIN_DIR)/$(PREFIX)-$(NAME)-uniform 
 
-$(BIN_DIR)/$(PREFIX)-hip-$(NAME): ici-main.cpp 
+$(BIN_DIR)/$(PREFIX)-$(NAME)-hop0: ici-main.cpp 
+	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) -DInterCCHop=0 -o $@ $<
+
+$(BIN_DIR)/$(PREFIX)-$(NAME)-hop1: ici-main.cpp 
+	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) -DInterCCHop=1 -o $@ $<
+
+$(BIN_DIR)/$(PREFIX)-$(NAME)-hop2: ici-main.cpp 
+	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) -DInterCCHop=2 -o $@ $<
+
+$(BIN_DIR)/$(PREFIX)-$(NAME)-hop3: ici-main.cpp 
+	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) -DInterCCHop=3 -o $@ $<
+
+$(BIN_DIR)/$(PREFIX)-$(NAME)-uniform: main.hip
 	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) -o $@ $<
 
 clean:
-	rm -f $(BIN_DIR)/$(PREFIX)-hip-$(NAME)
+	rm -f $(BIN_DIR)/$(PREFIX)-$(NAME)-hop0 
+	rm -f $(BIN_DIR)/$(PREFIX)-$(NAME)-hop1 
+	rm -f $(BIN_DIR)/$(PREFIX)-$(NAME)-hop2 
+	rm -f $(BIN_DIR)/$(PREFIX)-$(NAME)-hop3 
+	rm -f $(BIN_DIR)/$(PREFIX)-$(NAME)-uniform

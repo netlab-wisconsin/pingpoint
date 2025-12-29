@@ -28,6 +28,11 @@ typedef int64_t dtype;
 #define DEBUG_LEVEL 0
 #endif
 
+#define PINNED_XCD  0
+#ifndef PINNED_CC 
+#define PINNED_CC   0
+#endif
+
 // NOTE: This is NVIDIA PTX; it is not valid on AMD. Keeping it only because your code had it.
 // If you compile on AMD HIP, remove it or gate it properly.
 __device__ unsigned int smid() {
@@ -38,6 +43,7 @@ __device__ unsigned int smid() {
 
 template <typename T>
 __global__ void pchase(T *buf, T *__restrict__ dummy_buf, int64_t N) {
+
     // print (xcc_id,cu_id) of each block
     uint32_t cu_id, xcc_id, se_id;
     asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID, 8, 4)" : "=r"(cu_id));
@@ -45,8 +51,8 @@ __global__ void pchase(T *buf, T *__restrict__ dummy_buf, int64_t N) {
     asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=r"(xcc_id));
     // printf("xcc_id: %u, se_id: %u, cu_id: %u\n", xcc_id, se_id, cu_id);
     
-    // 일단 더함
-    if (xcc_id != 0) return;
+    // Constrain pchase thread to XCD 0
+    if (xcc_id != PINNED_XCD) return;
 
 
     int tidx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -71,8 +77,7 @@ inline uint32_t get_cc(uint32_t xcc_id) {
 }
 
 int main(int argc, char **argv) {
-    const int TARGET_CC = 0;
-    printf("Target CC: %d\n", TARGET_CC);
+    printf("Pinned XCD: %d Pinned CC: %d\n", PINNED_XCD, PINNED_CC);
 
 #ifdef __NVCC__
     GPU_ERROR(hipFuncSetAttribute(reinterpret_cast<const void *>(pchase<dtype>),
@@ -88,14 +93,10 @@ int main(int argc, char **argv) {
     std::mt19937 g(rd());
 
     for (int64_t LEN = 16; LEN < (1 << 24); LEN = (int64_t)(LEN * 1.042) + 1 + rand() % 11) {
-    // for (int64_t LEN = (1 << 15); LEN < (1 << 24); LEN = (int64_t)(LEN * 1.042) + 1 + rand() % 11) {
-
 
         if (LEN * skip_factor * cl_size * (int64_t)sizeof(dtype) > 120ll * 1024 * 1024) {
             LEN = (int64_t)(LEN * 1.1);
         }
-
-        // LEN = 141225; // for debug
 
         MeasurementSeries times;
         const int64_t iters = max(LEN, (int64_t)100000);
@@ -103,7 +104,7 @@ int main(int argc, char **argv) {
         for (int epoch = 0; epoch < 21; epoch++) {
             dtype *dbuf_base = nullptr;
 
-            const size_t multiplicative_factor = CC_NUM * 2;
+            const size_t multiplicative_factor = CC_NUM * 1; // increase mult_factor if per-CC chunks size is too small
             const size_t n_dtype_dbuf =
                 multiplicative_factor * (size_t)skip_factor * (size_t)cl_size * (size_t)LEN;
 
@@ -112,7 +113,7 @@ int main(int argc, char **argv) {
             // Number of *cache lines* in dbuf, consistent with your (k % (skip_factor*cl_size)) grouping.
             const size_t n_cl_dbuf = n_dtype_dbuf / ((size_t)cl_size * (size_t)skip_factor);
 
-            // Per-dtype CC identification. Too fine-grained (but keeping your structure).
+            // Per-dtype CC identification.
             vector<uint32_t> dtype_home_cc(n_dtype_dbuf, (uint32_t)-1);
             vector<vector<uint32_t>> cc_dtypes(CC_NUM);
 
@@ -120,7 +121,6 @@ int main(int argc, char **argv) {
             vector<uint32_t> cl_home_cc(n_cl_dbuf, (uint32_t)-1);
             vector<vector<uint32_t>> cc_cls(CC_NUM);
 
-            // ---- Identify home CCs (your existing logic) ----
             {
                 uint32_t *d_cycles = nullptr;
                 GPU_ERROR(hipMalloc(&d_cycles, n_dtype_dbuf * (size_t)XCD_NUM * sizeof(uint32_t)));
@@ -175,29 +175,25 @@ int main(int argc, char **argv) {
                 GPU_ERROR(hipFree(d_cycles));
             }
 
-#if DEBUG_LEVEL >= 1
+            #if DEBUG_LEVEL >= 1
             for (int cc = 0; cc < CC_NUM; cc++) {
                 cout << "CC " << cc << " has " << cc_dtypes[cc].size() << " dtypes.\n";
                 cout << "CC " << cc << " has " << cc_cls[cc].size() << " cache lines.\n";
             }
-#endif
+            #endif
 
-            // const int TARGET_CC = 0;
-            if (cc_cls[TARGET_CC].size() < (size_t)LEN) {
+            if (cc_cls[PINNED_CC].size() < (size_t)LEN) {
 #if DEBUG_LEVEL >= 1
-                cout << "Skipping epoch " << epoch << ": CC " << TARGET_CC
-                     << " only has " << cc_cls[TARGET_CC].size()
+                cout << "Skipping epoch " << epoch << ": CC " << PINNED_CC
+                     << " only has " << cc_cls[PINNED_CC].size()
                      << " cache lines, need LEN=" << LEN << "\n";
 #endif
                 GPU_ERROR(hipFree(dbuf_base));
                 continue;
             }
 
-            // ================================================================
-            // CHANGE YOU REQUESTED:
             // Allocate buf for the FULL n_cl_dbuf domain (i.e., full dbuf domain).
             // In practice this means buf is sized to n_dtype_dbuf (the full dtype domain).
-            // ================================================================
             dtype *buf = nullptr;
             GPU_ERROR(hipMallocManaged(&buf, n_dtype_dbuf * sizeof(dtype)));
             std::memset(buf, 0, n_dtype_dbuf * sizeof(dtype));
@@ -206,10 +202,10 @@ int main(int argc, char **argv) {
             GPU_ERROR(hipMallocManaged(&dummy_buf, sizeof(dtype)));
             dummy_buf[0] = 0;
 
-            // Choose LEN cache lines from TARGET_CC, shuffle them
+            // Choose LEN cache lines from PINNED_CC, shuffle them
             vector<uint32_t> seq(LEN);
             for (int64_t i = 0; i < LEN; i++) {
-                seq[i] = cc_cls[TARGET_CC][(size_t)i];
+                seq[i] = cc_cls[PINNED_CC][(size_t)i];
             }
             shuffle(seq.begin(), seq.end(), g);
 
@@ -267,10 +263,8 @@ int main(int argc, char **argv) {
             dtype *dbuf_start = dbuf_base + start_elem;
 
             // Warmup
-            // pchase<dtype><<<1, 1>>>(dbuf_start, dummy_buf, iters);
-            // pchase<dtype><<<1, 1>>>(dbuf_start, dummy_buf, iters);
-            pchase<dtype><<<8, 1>>>(dbuf_start, dummy_buf, iters);
-            pchase<dtype><<<8, 1>>>(dbuf_start, dummy_buf, iters);
+            pchase<dtype><<<XCD_NUM, 1>>>(dbuf_start, dummy_buf, iters);
+            pchase<dtype><<<XCD_NUM, 1>>>(dbuf_start, dummy_buf, iters);
             GPU_ERROR(hipDeviceSynchronize());
 
             hipEvent_t start, stop;
@@ -278,8 +272,7 @@ int main(int argc, char **argv) {
             GPU_ERROR(hipEventCreate(&stop));
 
             GPU_ERROR(hipEventRecord(start));
-            // pchase<dtype><<<1, 1>>>(dbuf_start, dummy_buf, iters);
-            pchase<dtype><<<8, 1>>>(dbuf_start, dummy_buf, iters);
+            pchase<dtype><<<XCD_NUM, 1>>>(dbuf_start, dummy_buf, iters); // 1 tb per xcd and prelude only xcd0 within the kernel
             GPU_ERROR(hipEventRecord(stop));
 
             GPU_ERROR(hipEventSynchronize(stop));

@@ -13,10 +13,30 @@ PREFIX		:= ici
 
 N 			:= 1
 
-all: $(BIN_DIR)/$(PREFIX)-$(NAME)
+all: $(BIN_DIR)/$(PREFIX)-$(NAME)-cc0 \
+	$(BIN_DIR)/$(PREFIX)-$(NAME)-cc1 \
+	$(BIN_DIR)/$(PREFIX)-$(NAME)-cc2 \
+	$(BIN_DIR)/$(PREFIX)-$(NAME)-cc3 \
+	$(BIN_DIR)/$(PREFIX)-$(NAME)-ccall
 
-$(BIN_DIR)/$(PREFIX)-hip-$(NAME): ici-main.cpp 
+$(BIN_DIR)/$(PREFIX)-$(NAME)-cc0: ici-main.cpp 
+	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) -DPINNED_CC=0 -o $@ $<
+
+$(BIN_DIR)/$(PREFIX)-$(NAME)-cc1: ici-main.cpp 
+	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) -DPINNED_CC=1 -o $@ $<
+
+$(BIN_DIR)/$(PREFIX)-$(NAME)-cc2: ici-main.cpp 
+	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) -DPINNED_CC=2 -o $@ $<
+
+$(BIN_DIR)/$(PREFIX)-$(NAME)-cc3: ici-main.cpp 
+	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) -DPINNED_CC=3 -o $@ $<
+
+$(BIN_DIR)/$(PREFIX)-$(NAME)-ccall: main.hip 
 	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) -o $@ $<
 
 clean:
-	rm -f $(BIN_DIR)/$(PREFIX)-hip-$(NAME)
+	rm -f $(BIN_DIR)/$(PREFIX)-$(NAME)-cc0
+	rm -f $(BIN_DIR)/$(PREFIX)-$(NAME)-cc1
+	rm -f $(BIN_DIR)/$(PREFIX)-$(NAME)-cc2
+	rm -f $(BIN_DIR)/$(PREFIX)-$(NAME)-cc3
+	rm -f $(BIN_DIR)/$(PREFIX)-$(NAME)-ccall
