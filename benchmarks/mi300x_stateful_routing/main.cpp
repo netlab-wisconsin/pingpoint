@@ -25,17 +25,17 @@ using namespace std;
 namespace cg = cooperative_groups;
 
 #ifndef DEBUG_LEVEL
-#define DEBUG_LEVEL 0
+#define DEBUG_LEVEL 1
 #endif
 
 #define K1_PINNED_XCD           0    // Kernel 1 pinned xcd
-#ifndef K1_PINNED_XCD_CHUNKS 
-#define K1_PINNED_XCD_CHUNKS    2
+#ifndef K1_PINNED_HBM_CHUNKS 
+#define K1_PINNED_HBM_CHUNKS    2
 #endif
 
 #define K2_PINNED_XCD           1    // Kernel 2 pinned xcd
-#ifndef K2_PINNED_XCD_CHUNKS
-#define K2_PINNED_XCD_CHUNKS    3
+#ifndef K2_PINNED_HBM_CHUNKS
+#define K2_PINNED_HBM_CHUNKS    3
 #endif
 
 typedef int64_t dtype;
@@ -45,23 +45,23 @@ inline uint32_t get_cc(uint32_t xcc_id) {
 }
 
 int main(int argc, char **argv) {
-    printf("K1 pinned XCD: %d K1 pinned CC: %d\n", K1_PINNED_XCD, get_cc(K1_PINNED_XCD_CHUNKS));
-    printf("K2 pinned XCD: %d K2 pinned CC: %d\n", K2_PINNED_XCD, get_cc(K2_PINNED_XCD_CHUNKS));
 
     unsigned int clock = getGPUClock();
-    const int cl_size = 128 / (int)sizeof(dtype);
 
     std::random_device rd;
     std::mt19937 g(rd());
+    
+    const size_t cl_bytes = 128;
 
     /* K1 data allocation */ 
     dtype *dbuf_base = nullptr;
 
-    const int64_t LEN = 8192;
-    const int skip_factor = 1;
+    const size_t n_cl = (1 << 16);
+    const size_t cl_size = cl_bytes / sizeof(dtype);
+    const size_t skip_factor = 1;
     const size_t multiplicative_factor = XCD_NUM * 1;
-    const size_t n_dtype_dbuf = multiplicative_factor * (size_t)skip_factor * (size_t)cl_size * (size_t)LEN;
-    const size_t n_cl_dbuf = n_dtype_dbuf / ((size_t)cl_size * (size_t)skip_factor);
+    const size_t n_dtype_dbuf = multiplicative_factor * skip_factor * cl_size * n_cl;
+    const size_t n_cl_dbuf = n_dtype_dbuf / (cl_size * skip_factor);
     GPU_ERROR(hipMalloc(&dbuf_base, n_dtype_dbuf * sizeof(dtype)));
 
     // Per-dtype xcd identification.
@@ -114,8 +114,8 @@ int main(int argc, char **argv) {
             dtype_home_xcd[k] = min_xcc;
             xcd_dtypes[min_xcc].push_back((uint32_t)k);
 
-            if (k % ((size_t)skip_factor * (size_t)cl_size) == 0) {
-                size_t cl_idx = k / ((size_t)skip_factor * (size_t)cl_size);
+            if (k % (skip_factor * cl_size) == 0) {
+                size_t cl_idx = k / (skip_factor * cl_size);
                 if (cl_idx < n_cl_dbuf) {
                     cl_home_xcd[cl_idx] = min_xcc;
                     xcd_cls[min_xcc].push_back((uint32_t)cl_idx);
@@ -125,26 +125,38 @@ int main(int argc, char **argv) {
 
         GPU_ERROR(hipFree(d_cycles));
     
-        #if DEBUG_LEVEL >= 1
+        #if DEBUG_LEVEL >= 2
         for (int x = 0; x < XCD_NUM; x++) {
             cout << "XCD " << x << " has " << xcd_dtypes[x].size() << " dtypes.\n";
             cout << "XCD " << x << " has " << xcd_cls[x].size() << " cache lines.\n";
         }
         #endif
         
-        if (xcd_cls[K1_PINNED_XCD_CHUNKS].size() < (size_t)LEN) {
-            // TODO: Handle insufficient cache lines
-            printf("TODO: handle corner case\n");
+        {
+            // boundary check
+            // single-CC LLC range is 1MB - 16MB
+            
+            if (xcd_cls[K1_PINNED_HBM_CHUNKS].size() * cl_bytes < (1 * 1024 * 1024)) {
+                cout << "K1 pinned HBM chunks size " << xcd_cls[K1_PINNED_HBM_CHUNKS].size() * cl_bytes << " MB" //
+                    << " is smaller than 1 MB" << "\n" << flush;
+                return -1;
+            }
 
-            // #if DEBUG_LEVEL >= 1
-            //     cout << "Skipping epoch " << epoch << ": XCD " << K1_PINNED_XCD_CHUNKS
-            //          << " only has " << xcd_cls[K1_PINNED_XCD_CHUNKS].size()
-            //          << " cache lines, need LEN=" << LEN << "\n";
-            // #endif
-            // GPU_ERROR(hipFree(dbuf_base));
-            // continue;
+            if (xcd_cls[K1_PINNED_HBM_CHUNKS].size() * cl_bytes > (16 * 1024 * 1024)) {
+                cout << "K1 pinned HBM chunks size " << xcd_cls[K1_PINNED_HBM_CHUNKS].size() * cl_bytes << " MB" //
+                    << " is larger than 16 MB" << "\n" << flush;
+                return -1;
+            }
         }
     }
+
+    #if DEBUG_LEVEL >= 1
+    cout << "K1" << " " << K1_PINNED_XCD << "->" << K1_PINNED_HBM_CHUNKS << "(" << get_cc(K1_PINNED_HBM_CHUNKS) << ")" << " " //
+         << n_dtype_dbuf * sizeof(dtype) / (1024 * 1024) << " MB " //
+         << xcd_cls[K1_PINNED_HBM_CHUNKS].size() * cl_bytes / (1024 * 1024) << " MB " //
+         << "\n" << flush;
+    #endif
+
 
     /* K2 thread block configuration*/
     const int k2_bpx = 1; // TODO: scale
@@ -158,17 +170,14 @@ int main(int argc, char **argv) {
 
     const int k2_n_threads_per_block = (k2_n_warps_per_block * k2_n_threads_per_warp);
     const int k2_total_threads = (k2_n_blocks * k2_n_threads_per_block);
-    printf("k2_n_blocks: %d, k2_n_blocks_per_xcd: %d, k2_n_warps_per_block: %d, k2_n_threads_per_warp: %d\n", k2_n_blocks, k2_bpx, k2_n_warps_per_block, k2_n_threads_per_warp);
 
     /* K2 data allocation */
 
     const int k2_n_datas = 4;
-
     // const long long k2_n_pages = (128 << 6); // 16GB per input data
     const long long k2_n_pages = 128; // 256MB per input data
     const long long k2_data_size = (k2_n_pages * k2_page_size);
     const size_t k2_n_chunks = k2_data_size / k2_chunk_size;
-    printf("k2_n_datas: %d, k2_data_size: %lld MB, k2_chunk_size: %d KB\n", k2_n_datas, k2_data_size / (1024 * 1024), k2_chunk_size / 1024);
 
     vector<char*> k2_d_data(k2_n_datas);
     for (int i = 0; i < k2_n_datas; i++) {
@@ -176,23 +185,26 @@ int main(int argc, char **argv) {
         k2_d_data[i] = (char*)(((uintptr_t)k2_d_data[i] & ~(0x0FFF)) + 0x1000);
     }
 
-    
-
-    // home identification for k2 data
+    // Per-chunk xcd identification.
     vector<vector<int>> k2_h_home(k2_n_datas, vector<int>(k2_n_chunks));
     vector<vector<size_t>> k2_h_xcd_chunks_size(k2_n_datas, vector<size_t>(XCD_NUM, 0)); // count #chunks per-data per-xcd. init to 0
 
+    /* K2 data home identification */
     {
         // per-data, per-xcd, per-chunk. record cycles for home identification
         // last two dimensions are flattened
         vector<uint32_t*> d_cycles(k2_n_datas);
         for (int i = 0; i < k2_n_datas; i++) {
             GPU_ERROR(hipMalloc((void**)&d_cycles[i], sizeof(uint32_t) * XCD_NUM * k2_n_chunks));
+            #if DEBUG_LEVEL >= 2
             printf("allocated d_cycles[%d] array[%d][%zu]\n", i, XCD_NUM, k2_n_chunks);
+            #endif
         }
 
         for (int i = 0; i < k2_n_datas; i++) {
+            #if DEBUG_LEVEL >= 2
             printf("Identifying home xcd for data[%d]...\n", i);
+            #endif
 
             void *kernel_args[] = {
                 (void*)&k2_d_data[i],
@@ -232,21 +244,25 @@ int main(int argc, char **argv) {
                 }
                 k2_h_home[i][k] = min_xcc;
                 k2_h_xcd_chunks_size[i][min_xcc]++;
-                #if DEBUG
+                #if DEBUG_LEVEL >= 3
                 printf("data[%d] chunk[%zu]: home xcd %d\n", i, k, k2_h_home[i][k]);
                 #endif
             }
-            #if DEBUG
+            #if DEBUG_LEVEL >= 2
             for (int x = 0; x < XCD_NUM; x++) {
                 printf("data[%d] xcd %d: n_chunks %zu\n", i, x, k2_h_xcd_chunks_size[i][x]);
             }
             printf("\n");
             #endif
         }
-
     }
 
-    // gpu-lat L195부터. for loop 내로 넣어야 할 수 도.
+    #if DEBUG_LEVEL >= 1
+    cout << "K2" << " " << K2_PINNED_XCD << "->" << K2_PINNED_HBM_CHUNKS << "(" << get_cc(K2_PINNED_HBM_CHUNKS) << ")" << " " //
+         << k2_n_datas * k2_data_size / (1024 * 1024) << " MB " //
+         << (k2_h_xcd_chunks_size[0][K2_PINNED_HBM_CHUNKS] + k2_h_xcd_chunks_size[1][K2_PINNED_HBM_CHUNKS] + k2_h_xcd_chunks_size[2][K2_PINNED_HBM_CHUNKS] + k2_h_xcd_chunks_size[3][K2_PINNED_HBM_CHUNKS]) * k2_chunk_size / (1024 * 1024) << " MB " //
+         << "\n" << flush;
+    #endif
 
     return 0;
 }

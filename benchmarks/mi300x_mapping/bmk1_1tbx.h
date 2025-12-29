@@ -84,8 +84,10 @@ __global__ void identify_home(void *data, size_t size, uint32_t *d_cycles, int n
     const size_t n_16Bs = size / sizeof(uint4);
     const size_t n_iter = n_16Bs / (blockDim.x * n_tbs_in_xcd); // thread blocks on same xcd streams over the data chunks
     if (bid == 0 && tid == 0) {
+        #if DEBUG
         printf("n_16Bs: %zu, n_iter: %zu\n", n_16Bs, n_iter);
         printf("working set per xcd: %.2f MB\n", (n_16Bs * sizeof(uint4) / XCDS_NUM) / (1024.0 * 1024.0));
+        #endif
     }
 
     const size_t inner_size = 64 * 1024 * 1024; // 64MB per inner loop (given TLB lat jump at 64MB)
