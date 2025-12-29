@@ -10,7 +10,7 @@ BPX_MAX := 275
 
 all:
 	@for t in $$(seq 1 $(BPX_MAX)); do \
-		for xo in 2 4; do \
+		for xo in 2 4 6; do \
 			out=$(BIN_DIR)/tornado_bpx_$${t}_hop_$$(($$xo/2)); \
 			cmd="$(CC) $(HIPOPTS) -DBPX=$$t -DXTO=$$xo tornado.cpp -o $$out"; \
 			echo "$$cmd"; $$cmd || exit 1; \
@@ -25,6 +25,11 @@ tornado_bpx_%_hop_1:
 tornado_bpx_%_hop_2:
 	@t=$*; out=$(BIN_DIR)/$@; \
 	cmd="$(CC) $(HIPOPTS) -DBPX=$$t -DXTO=4 tornado.cpp -o $$out"; \
+	echo "$$cmd"; $$cmd
+
+tornado_bpx_%_hop_3:
+	@t=$*; out=$(BIN_DIR)/$@; \
+	cmd="$(CC) $(HIPOPTS) -DBPX=$$t -DXTO=6 tornado.cpp -o $$out"; \
 	echo "$$cmd"; $$cmd
 
 clean:

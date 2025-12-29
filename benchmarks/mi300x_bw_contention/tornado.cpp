@@ -6,7 +6,7 @@
 #include <vector>
 #include <hip/hip_runtime.h>
 
-#include "../mi300x_mapping/bmk1_ntbx.h"
+#include "../mi300x_mapping/bmk1_1tbx.h"
 #include "../mi300x_mapping/bmk3.h"
 
 #ifndef BPX
@@ -179,6 +179,9 @@ int main() {
             break;
         case 4:
             printf("tornado traffic (2 hops)\n");
+            break;
+        case 6:
+            printf("tornado traffic (3 hops)\n");
             break;
         default:
             printf("invalid XTO %d\n", XTO);
