@@ -252,6 +252,59 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* group per-xcd chunk pointers */
+    
+    vector<vector<vector<uint64_t>>> k2_xcd_chunks(k2_n_datas, vector<vector<uint64_t>>(XCD_NUM));
+    for (int i = 0; i < k2_n_datas; i++) {
+        for (size_t k = 0; k < k2_n_chunks; k++) {
+            k2_xcd_chunks[i][k2_h_home[i][k]].push_back(reinterpret_cast<uint64_t>(k2_d_data[i]) + k * (k2_chunk_size));
+        }
+    }
+    // safety check
+    for (int i = 0; i < k2_n_datas; i++) {
+        for (int x = 0; x < XCD_NUM; x++) {
+            assert( k2_xcd_chunks[i][x].size() == k2_h_xcd_chunks_size[i][x] );
+            printf("data[%d] xcd %d: n_chunks %zu\n", i, x, k2_xcd_chunks[i][x].size());
+        }
+    }
+
+    vector<uint64_t*> k2_d_xcd_chunks(k2_n_datas);
+    vector<size_t*> k2_d_xcd_chunks_offset(k2_n_datas); // set starting point for each xcd in 1d k2_d_xcd_chunks array
+    for (int i = 0; i < k2_n_datas; i++) {
+        GPU_ERROR(hipMalloc((void**)&k2_d_xcd_chunks[i], sizeof(uint64_t) * k2_n_chunks ));
+        GPU_ERROR(hipMalloc((void**)&k2_d_xcd_chunks_offset[i], sizeof(size_t) * XCD_NUM));
+        size_t _offset = 0;
+        for (int x = 0; x < XCD_NUM; x++) {
+            size_t _n_chunks = k2_h_xcd_chunks_size[i][x];
+            GPU_ERROR(hipMemcpy(&k2_d_xcd_chunks[i][_offset], k2_xcd_chunks[i][x].data(), sizeof(uint64_t) * _n_chunks, hipMemcpyHostToDevice));
+            k2_d_xcd_chunks_offset[i][x] = _offset;
+            _offset += _n_chunks;
+        }
+    }
+
+    /* count # per-xcd chunk */
+    
+    vector<size_t> k2_xcd_chunks_size(XCD_NUM, SIZE_MAX);
+    for (int i = 0; i < k2_n_datas; i++) {
+        for (int x = 0; x < XCD_NUM; x++) {
+            // Determine the minimum chunk count for this XCD across all datasets.
+            // This establishes a safe common upper bound, preventing out-of-bounds access on datasets with fewer chunks.
+            k2_xcd_chunks_size[x] = min(k2_xcd_chunks_size[x], k2_h_xcd_chunks_size[i][x]);
+        }   
+    }
+    // ensure minimal 8MB = 2 * l2_size per-xcd chunks in order to thrash l2
+    // conservative. since 2 xcds on same iod actually share the home data, another approach can be
+    // ensure minimal 8MB per-iod chunks 
+    const int min_n_chunks_per_xcd = ((4*2 * 1024 * 1024) / (k2_chunk_size)); // minimal #chunks >= 8MB
+    for (int x = 0; x < XCD_NUM; x++) {
+        printf("xcd %d: min n_chunks %zu\n", x, k2_xcd_chunks_size[x]);
+        assert (k2_xcd_chunks_size[x] * k2_n_datas >= min_n_chunks_per_xcd); // k2_xcd_chunks_size[x] is minimal #chunks per xcd among all datas. 
+    }
+    
+    size_t *k2_d_xcd_chunks_size;
+    GPU_ERROR(hipMalloc((void**)&k2_d_xcd_chunks_size, sizeof(size_t) * XCD_NUM));
+    GPU_ERROR(hipMemcpy(k2_d_xcd_chunks_size, k2_xcd_chunks_size.data(), sizeof(size_t) * XCD_NUM, hipMemcpyHostToDevice));
+
     #if DEBUG_LEVEL >= 1
     cout << "K2" << " " << K2_PINNED_XCD << "->" << K2_PINNED_HBM_CHUNKS << "(" << get_cc(K2_PINNED_HBM_CHUNKS) << ")" << " " //
          << k2_n_datas * k2_data_size / (1024 * 1024) << " MB " //
@@ -359,26 +412,42 @@ int main(int argc, char **argv) {
 
             /* fused kernel launch */
 
-            hipEvent_t start, stop;
-            GPU_ERROR(hipEventCreate(&start));
-            GPU_ERROR(hipEventCreate(&stop));
-
-            GPU_ERROR(hipEventRecord(start));
-            // TODO: change to fused kernel
-            k1<dtype><<<XCD_NUM, 1>>>(dbuf_start, dummy_buf, iters, K1_PINNED_XCD); // 1 tb per xcd and prelude only xcd0 within the kernel
-            GPU_ERROR(hipEventRecord(stop));
-
-            GPU_ERROR(hipEventSynchronize(stop));
-            float milliseconds = 0;
-            GPU_ERROR(hipEventElapsedTime(&milliseconds, start, stop));
-
-            times.add(milliseconds / 1000);
-
+            uint32_t *d_k1_startClk, *d_k1_stopClk;
+            GPU_ERROR(hipMalloc(&d_k1_startClk, sizeof(uint32_t) * iters));
+            GPU_ERROR(hipMalloc(&d_k1_stopClk, sizeof(uint32_t) * iters));
+            
+            k<dtype><<<k2_n_blocks, k2_n_threads_per_block>>>(
+                dbuf_start, dummy_buf, iters, K1_PINNED_XCD, d_k1_startClk, d_k1_stopClk,
+                k2_d_xcd_chunks[0], k2_d_xcd_chunks[1], k2_d_xcd_chunks[2], k2_d_xcd_chunks[3],
+                k2_d_xcd_chunks_offset[0], k2_d_xcd_chunks_offset[1], k2_d_xcd_chunks_offset[2], k2_d_xcd_chunks_offset[3],
+                k2_d_xcd_chunks_size, k2_chunk_size, K2_PINNED_XCD,
+                nullptr, nullptr
+            );
+            GPU_ERROR(hipDeviceSynchronize());
             GPU_ERROR(hipGetLastError());
 
-            GPU_ERROR(hipEventDestroy(start));
-            GPU_ERROR(hipEventDestroy(stop));
+            vector<uint32_t> h_start(iters);
+            vector<uint32_t> h_stop(iters);
 
+            GPU_ERROR(hipMemcpy(h_start.data(), d_k1_startClk, sizeof(uint32_t) * iters, hipMemcpyDeviceToHost));
+            GPU_ERROR(hipMemcpy(h_stop.data(), d_k1_stopClk, sizeof(uint32_t) * iters, hipMemcpyDeviceToHost));
+
+            // for (int64_t i = 0; i < iters; i++) {
+            //     uint32_t start_cycles = h_start[(size_t)i];
+            //     uint32_t stop_cycles  = h_stop[(size_t)i];
+            //     uint32_t elapsed = stop_cycles - start_cycles;
+            //     printf("K1 iter %lld: start %u stop %u elapsed %u\n", i, start_cycles, stop_cycles, elapsed);
+            //     // times.add((double)elapsed / (double)clock);
+            // }
+
+            // 일단 전체 elapsed cycle을 잡아보자. 더 finer-grained한 측정은 나중에
+            times.add((double)(h_stop[0] - h_start[0]) / ((double)clock * 1e6));
+
+            // Cleanup cycle buffers for this epoch
+            GPU_ERROR(hipFree(d_k1_startClk));
+            GPU_ERROR(hipFree(d_k1_stopClk));
+            // --- Logic to log timing ends here ---
+            
             GPU_ERROR(hipFree(buf));
             GPU_ERROR(hipFree(dummy_buf));
             // GPU_ERROR(hipFree(dbuf_base));
