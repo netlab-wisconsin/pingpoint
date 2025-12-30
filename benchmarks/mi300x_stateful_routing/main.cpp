@@ -13,13 +13,14 @@
 #include <sys/time.h>
 #include <vector>
 
-// #include "../../mem_bench/MeasurementSeries.hpp"
-// #include "../../mem_bench/dtime.hpp"
+#include "../../mem_bench/MeasurementSeries.hpp"
+#include "../../mem_bench/dtime.hpp"
 #include "../../mem_bench/gpu-clock.cuh"
 #include "../../mem_bench/gpu-error.h"
 
 #include "../mi300x_mapping/bmk1_1tbx.h"
 #include "main.h"
+#include "kernel.h"
 
 using namespace std;
 namespace cg = cooperative_groups;
@@ -38,15 +39,18 @@ namespace cg = cooperative_groups;
 #define K2_PINNED_HBM_CHUNKS    3
 #endif
 
+#ifndef K2_BPX_MAX
+#define K2_BPX_MAX 40
+#endif
+
 typedef int64_t dtype;
+
 
 inline uint32_t get_cc(uint32_t xcc_id) {
     return (xcc_id / (XCD_NUM / CC_NUM)) % CC_NUM;
 }
 
 int main(int argc, char **argv) {
-
-    unsigned int clock = getGPUClock();
 
     std::random_device rd;
     std::mt19937 g(rd());
@@ -56,11 +60,11 @@ int main(int argc, char **argv) {
     /* K1 data allocation */ 
     dtype *dbuf_base = nullptr;
 
-    const size_t n_cl = (1 << 16);
+    const size_t LEN = (1 << 16);
     const size_t cl_size = cl_bytes / sizeof(dtype);
     const size_t skip_factor = 1;
     const size_t multiplicative_factor = XCD_NUM * 1;
-    const size_t n_dtype_dbuf = multiplicative_factor * skip_factor * cl_size * n_cl;
+    const size_t n_dtype_dbuf = multiplicative_factor * skip_factor * cl_size * LEN;
     const size_t n_cl_dbuf = n_dtype_dbuf / (cl_size * skip_factor);
     GPU_ERROR(hipMalloc(&dbuf_base, n_dtype_dbuf * sizeof(dtype)));
 
@@ -158,25 +162,16 @@ int main(int argc, char **argv) {
     #endif
 
 
-    /* K2 thread block configuration*/
-    const int k2_bpx = 1; // TODO: scale
-    const int k2_n_blocks = (k2_bpx * XCD_NUM);
-
-    const int k2_page_size = (2 * 1024 * 1024); // 2MB huge page
-    const int k2_chunk_size = (2 * 1024); // 2KB
-    const int k2_n_threads_per_warp = 64;
-    const int k2_n_warps_per_block = (k2_chunk_size / (k2_n_threads_per_warp * 16)); // set to make each tb load 1 chunk per iter. each thread loads 16B per iter.
-    assert( (k2_n_threads_per_warp * k2_n_warps_per_block) <= 1024 );   
-
-    const int k2_n_threads_per_block = (k2_n_warps_per_block * k2_n_threads_per_warp);
-    const int k2_total_threads = (k2_n_blocks * k2_n_threads_per_block);
-
     /* K2 data allocation */
 
     const int k2_n_datas = 4;
+
     // const long long k2_n_pages = (128 << 6); // 16GB per input data
     const long long k2_n_pages = 128; // 256MB per input data
+    const int k2_page_size = (2 * 1024 * 1024); // 2MB huge page
     const long long k2_data_size = (k2_n_pages * k2_page_size);
+
+    const int k2_chunk_size = (2 * 1024); // 2KB
     const size_t k2_n_chunks = k2_data_size / k2_chunk_size;
 
     vector<char*> k2_d_data(k2_n_datas);
@@ -263,6 +258,149 @@ int main(int argc, char **argv) {
          << (k2_h_xcd_chunks_size[0][K2_PINNED_HBM_CHUNKS] + k2_h_xcd_chunks_size[1][K2_PINNED_HBM_CHUNKS] + k2_h_xcd_chunks_size[2][K2_PINNED_HBM_CHUNKS] + k2_h_xcd_chunks_size[3][K2_PINNED_HBM_CHUNKS]) * k2_chunk_size / (1024 * 1024) << " MB " //
          << "\n" << flush;
     #endif
+
+    unsigned int clock = getGPUClock();
+
+    for (int k2_bpx = 1; k2_bpx <= K2_BPX_MAX; k2_bpx++) {
+
+        MeasurementSeries times;
+        const int64_t iters = max(LEN, (int64_t)100000);
+
+        for (int epoch = 0; epoch < 21; epoch++) {
+
+            // Allocate buf for the FULL n_cl_dbuf domain (i.e., full dbuf domain).
+            // In practice this means buf is sized to n_dtype_dbuf (the full dtype domain).
+            dtype *buf = nullptr;
+            GPU_ERROR(hipMallocManaged(&buf, n_dtype_dbuf * sizeof(dtype)));
+            std::memset(buf, 0, n_dtype_dbuf * sizeof(dtype));
+
+            dtype *dummy_buf = nullptr;
+            GPU_ERROR(hipMallocManaged(&dummy_buf, sizeof(dtype)));
+            dummy_buf[0] = 0;
+
+            // Choose LEN cache lines from PINNED_CC, shuffle them
+            vector<uint32_t> seq(LEN);
+            for (int64_t i = 0; i < LEN; i++) {
+                seq[i] = xcd_cls[K1_PINNED_HBM_CHUNKS][(size_t)i];
+            }
+            shuffle(seq.begin(), seq.end(), g);
+
+            #if DEBUG_LEVEL >= 2
+            cout << "Access CL sequence (CL indices in full domain): ";
+            for (int64_t i = 0; i < LEN; i++) cout << seq[(size_t)i] << " ";
+            cout << "\n";
+            #endif
+
+            // Build a cycle over those cache lines.
+            // For each cache line, we write pointers for *all lanes* (cl_lane=0..cl_size-1),
+            // so the CL is fully populated with valid pointer values.
+            //
+            // Element index for (cacheline cl_idx, lane cl_lane) is:
+            //   elem = (cl_idx * cl_size + cl_lane) * skip_factor
+            //
+            // Stored value is an absolute device address:
+            //   (uintptr_t)dbuf_base + next_elem * sizeof(dtype)
+            //
+            for (int cl_lane = 0; cl_lane < cl_size; cl_lane++) {
+                for (int64_t i = 0; i < LEN; i++) {
+                    uint32_t cur_cl  = seq[(size_t)i];
+                    uint32_t next_cl = seq[(size_t)((i + 1) % LEN)];
+
+                    size_t cur_elem  = ((size_t)cur_cl  * (size_t)cl_size + (size_t)cl_lane) * (size_t)skip_factor;
+                    size_t next_elem = ((size_t)next_cl * (size_t)cl_size + (size_t)cl_lane) * (size_t)skip_factor;
+
+                    // Bounds safety (should hold if n_cl_dbuf is consistent)
+                    if (cur_elem >= n_dtype_dbuf || next_elem >= n_dtype_dbuf) {
+                        cerr << "BUG: elem OOB: cur_elem=" << cur_elem
+                                << " next_elem=" << next_elem
+                                << " n_dtype_dbuf=" << n_dtype_dbuf << "\n";
+                        GPU_ERROR(hipFree(buf));
+                        GPU_ERROR(hipFree(dummy_buf));
+                        GPU_ERROR(hipFree(dbuf_base));
+                        return 1;
+                    }
+
+                    uintptr_t next_addr = (uintptr_t)dbuf_base + next_elem * sizeof(dtype);
+                    buf[cur_elem] = (dtype)next_addr;
+
+                    #if DEBUG_LEVEL >= 3
+                    printf("cur_cl=%u lane=%d cur_elem=%zu -> next_cl=%u next_elem=%zu addr=%" PRIxPTR "\n",
+                            cur_cl, cl_lane, cur_elem, next_cl, next_elem, next_addr);
+                    #endif
+                }
+            }
+
+            // Copy the full pointer table into device allocation.
+            GPU_ERROR(hipMemcpy(dbuf_base, buf, n_dtype_dbuf * sizeof(dtype), hipMemcpyHostToDevice));
+            GPU_ERROR(hipDeviceSynchronize());
+
+            // Start pointer: lane 0 of the first cache line in seq[]
+            size_t start_elem = ((size_t)seq[0] * (size_t)cl_size + 0) * (size_t)skip_factor;
+            dtype *dbuf_start = dbuf_base + start_elem;
+
+            
+            // K1 warmup
+            k1<dtype><<<XCD_NUM, 1>>>(dbuf_start, dummy_buf, iters, K1_PINNED_XCD);
+            k1<dtype><<<XCD_NUM, 1>>>(dbuf_start, dummy_buf, iters, K1_PINNED_XCD);
+            GPU_ERROR(hipDeviceSynchronize());
+
+
+            /* K2 thread block configuration */
+
+            const int k2_n_blocks = (k2_bpx * XCD_NUM);
+            const int k2_n_threads_per_warp = 64;
+
+            // Since each thread loads 16B per iter, `k2_n_warps_per_block` set s.t. each tb loads 1 chunk per iter
+            const int k2_n_warps_per_block = (k2_chunk_size / (k2_n_threads_per_warp * 16)); 
+            assert((k2_n_threads_per_warp * k2_n_warps_per_block) <= 1024); // assert max 1024 threads per block
+
+            const int k2_n_threads_per_block = (k2_n_warps_per_block * k2_n_threads_per_warp);
+            const int k2_total_threads = (k2_n_blocks * k2_n_threads_per_block);
+
+            /* fused kernel launch */
+
+            hipEvent_t start, stop;
+            GPU_ERROR(hipEventCreate(&start));
+            GPU_ERROR(hipEventCreate(&stop));
+
+            GPU_ERROR(hipEventRecord(start));
+            // TODO: change to fused kernel
+            k1<dtype><<<XCD_NUM, 1>>>(dbuf_start, dummy_buf, iters, K1_PINNED_XCD); // 1 tb per xcd and prelude only xcd0 within the kernel
+            GPU_ERROR(hipEventRecord(stop));
+
+            GPU_ERROR(hipEventSynchronize(stop));
+            float milliseconds = 0;
+            GPU_ERROR(hipEventElapsedTime(&milliseconds, start, stop));
+
+            times.add(milliseconds / 1000);
+
+            GPU_ERROR(hipGetLastError());
+
+            GPU_ERROR(hipEventDestroy(start));
+            GPU_ERROR(hipEventDestroy(stop));
+
+            GPU_ERROR(hipFree(buf));
+            GPU_ERROR(hipFree(dummy_buf));
+            // GPU_ERROR(hipFree(dbuf_base));
+
+        } /* >8 end epoch */
+
+        double dt = times.value();
+        double dtmed = times.median();
+        double dtmin = times.getPercentile(0.05);
+        double dtmax = times.getPercentile(0.95);
+
+        cout << setw(2) << k2_bpx << " "
+             << setw(9) << iters << " " << setw(5) << clock << " " //
+             << setw(8) << skip_factor * LEN * cl_size * sizeof(dtype) / 1024.0 << " "
+             << fixed << setprecision(1) << setw(8) << dt * 1000 << " " //
+             << setw(7) << setprecision(1) << (double)dt / iters * clock * 1000 * 1000 << " "
+             << (double)dtmed / iters * clock * 1000 * 1000 << " "
+             << (double)dtmin / iters * clock * 1000 * 1000 << " "
+             << (double)dtmax / iters * clock * 1000 * 1000 << "\n"
+             << flush;
+        
+    } /* >8 end bpx */
 
     return 0;
 }
