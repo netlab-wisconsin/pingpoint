@@ -510,7 +510,6 @@ int main(int argc, char **argv) {
             // global bw
             // bw based on max cycles among tbs in this xcd
             double bytes = (double)(k2_d_xcd_chunks_size[K2_PINNED_HBM] * k2_chunk_size * k2_n_datas); // total bytes accessed by this xcd
-            bytes /= 4; // 이거 현재 32 thread만 쓰고 있어서 그럼
             const double global_time_sec = (double)(max_xcd_cycles_stop - min_xcd_cycles_start) / ((double)clock * 1e6);
             const double global_bw_GBps = (bytes / global_time_sec) / 1e9;
             k2_bws.add(global_bw_GBps);
