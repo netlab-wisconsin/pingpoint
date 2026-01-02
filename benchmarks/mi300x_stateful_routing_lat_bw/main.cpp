@@ -49,6 +49,10 @@ namespace cg = cooperative_groups;
 #define K2_BPX_MAX 40
 #endif
 
+#ifndef K2_TPB
+#define K2_TPB 128
+#endif
+
 typedef int64_t dtype;
 
 
@@ -326,10 +330,12 @@ int main(int argc, char **argv) {
 
     unsigned int clock = getGPUClock();
 
-    for (int k2_bpx = 38; k2_bpx <= K2_BPX_MAX; k2_bpx++) {
+    for (int k2_bpx = 1; k2_bpx <= K2_BPX_MAX; k2_bpx++) {
 
         MeasurementSeries times;
         const int64_t iters = max(LEN, (int64_t)100000);
+
+        MeasurementSeries k2_bws;
 
         for (int epoch = 0; epoch < 21; epoch++) {
 
@@ -427,16 +433,60 @@ int main(int argc, char **argv) {
             uint32_t *d_k1_startClk, *d_k1_stopClk;
             GPU_ERROR(hipMalloc(&d_k1_startClk, sizeof(uint32_t) * iters));
             GPU_ERROR(hipMalloc(&d_k1_stopClk, sizeof(uint32_t) * iters));
-            
+
+            // per-xcd, per-tb in xcd. record start/stop cycles for bw measurement
+            uint32_t *d_k2_startClk, *d_k2_stopClk; 
+            GPU_ERROR(hipMalloc((void**)&d_k2_startClk, sizeof(uint32_t) * k2_bpx ));
+            GPU_ERROR(hipMalloc((void**)&d_k2_stopClk, sizeof(uint32_t) * k2_bpx ));
+
             k<dtype><<<k2_n_blocks, k2_n_threads_per_block>>>(
                 dbuf_start, dummy_buf, iters, K1_PINNED_XCD, d_k1_startClk, d_k1_stopClk,
                 k2_d_xcd_chunks[0], k2_d_xcd_chunks[1], k2_d_xcd_chunks[2], k2_d_xcd_chunks[3],
                 k2_d_xcd_chunks_offset[0], k2_d_xcd_chunks_offset[1], k2_d_xcd_chunks_offset[2], k2_d_xcd_chunks_offset[3],
-                k2_d_xcd_chunks_size, k2_chunk_size, K2_PINNED_XCD, K2_PINNED_HBM,
-                nullptr, nullptr
+                k2_d_xcd_chunks_size, k2_chunk_size, K2_PINNED_XCD, K2_PINNED_HBM, K2_TPB,
+                d_k2_startClk, d_k2_stopClk
             );
             GPU_ERROR(hipDeviceSynchronize());
             GPU_ERROR(hipGetLastError());
+
+            // parse k2 results 
+            vector<uint32_t> h_k2_cycles_start(k2_bpx);
+            vector<uint32_t> h_k2_cycles_stop(k2_bpx);
+            GPU_ERROR(hipMemcpy(h_k2_cycles_start.data(), d_k2_startClk, sizeof(uint32_t) * k2_bpx, hipMemcpyDeviceToHost));
+            GPU_ERROR(hipMemcpy(h_k2_cycles_stop.data(), d_k2_stopClk, sizeof(uint32_t) * k2_bpx, hipMemcpyDeviceToHost));
+
+            // for avg lat calc
+            double avg_xcd_cycles = 0.0;
+            // for global bw calc
+            uint32_t min_xcd_cycles_start = 0xFFFFFFFF;
+            uint32_t max_xcd_cycles_stop = 0;
+            for (int tbid_in_xcd = 0; tbid_in_xcd < k2_bpx; tbid_in_xcd++) {
+                // incremental avg
+                avg_xcd_cycles += ((h_k2_cycles_stop[tbid_in_xcd] - h_k2_cycles_start[tbid_in_xcd]) - avg_xcd_cycles) / (tbid_in_xcd + 1);
+
+                // set earliest start cycle for this xcd
+                if (h_k2_cycles_start[tbid_in_xcd] < min_xcd_cycles_start) {
+                    min_xcd_cycles_start = h_k2_cycles_start[tbid_in_xcd];
+                }
+                // set latest stop cycle for this xcd
+                if (h_k2_cycles_stop[tbid_in_xcd] > max_xcd_cycles_stop) {
+                    max_xcd_cycles_stop = h_k2_cycles_stop[tbid_in_xcd];
+                }
+            }
+            // global bw
+            // bw based on max cycles among tbs in this xcd
+            double bytes = (double)(k2_d_xcd_chunks_size[K2_PINNED_HBM] * k2_chunk_size * k2_n_datas); // total bytes accessed by this xcd
+            bytes /= 4; // 이거 현재 32 thread만 쓰고 있어서 그럼
+            const double global_time_sec = (double)(max_xcd_cycles_stop - min_xcd_cycles_start) / ((double)clock * 1e6);
+            const double global_bw_GBps = (bytes / global_time_sec) / 1e9;
+            k2_bws.add(global_bw_GBps);
+
+            #if DEBUG_LEVEL >= 1
+            printf("epoch %d xcd %d: global bw %.2f GB/s\n", epoch, K2_PINNED_XCD, global_bw_GBps);
+            #endif
+
+
+            // end parse k2 results
 
             vector<uint32_t> h_start(iters);
             vector<uint32_t> h_stop(iters);
@@ -470,14 +520,15 @@ int main(int argc, char **argv) {
         double dtmin = times.getPercentile(0.05);
         double dtmax = times.getPercentile(0.95);
 
-        cout << setw(2) << k2_bpx << " "
-             << setw(9) << iters << " " << setw(5) << clock << " " //
+        cout << setw(2) << k2_bpx << " " << setw(2) << K2_TPB << " "
+             << setw(9) << iters << " " << setw(5) << clock << " " 
              << setw(8) << skip_factor * LEN * cl_size * sizeof(dtype) / 1024.0 << " "
-             << fixed << setprecision(1) << setw(8) << dt * 1000 << " " //
+             << fixed << setprecision(1) << setw(8) << dt * 1000 << " " 
              << setw(7) << setprecision(1) << (double)dt / iters * clock * 1000 * 1000 << " "
              << (double)dtmed / iters * clock * 1000 * 1000 << " "
              << (double)dtmin / iters * clock * 1000 * 1000 << " "
-             << (double)dtmax / iters * clock * 1000 * 1000 << "\n"
+             << (double)dtmax / iters * clock * 1000 * 1000 << " "
+             << k2_bws.value() << "GB/s" << "\n"
              << flush;
         
     } /* >8 end bpx */

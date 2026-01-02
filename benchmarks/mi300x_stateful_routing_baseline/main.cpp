@@ -174,8 +174,8 @@ int main(int argc, char **argv) {
 
     const int k2_n_datas = 4;
 
-    const long long k2_n_pages = (128 << 6); // 16GB per input data
-    // const long long k2_n_pages = 128; // 256MB per input data
+    // const long long k2_n_pages = (128 << 6); // 16GB per input data
+    const long long k2_n_pages = 128; // 256MB per input data
     const int k2_page_size = (2 * 1024 * 1024); // 2MB huge page
     const long long k2_data_size = (k2_n_pages * k2_page_size);
 
