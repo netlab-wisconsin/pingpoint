@@ -16,17 +16,17 @@
 #include "../../mem_bench/MeasurementSeries.hpp"
 #include "../../mem_bench/dtime.hpp"
 #include "../../mem_bench/gpu-clock.cuh"
-#include "../../mem_bench/gpu-error.h"
 
-#include "../mi300x_mapping/bmk1_1tbx.h"
 #include "main.h"
-#include "kernel.h"
+#include "fused_kernel.h"
+#include "k1.h"
+#include "k2.h"
 
 using namespace std;
 namespace cg = cooperative_groups;
 
 #ifndef DEBUG_LEVEL
-#define DEBUG_LEVEL 2
+#define DEBUG_LEVEL 1
 #endif
 
 #ifndef K2_PINNED_XCD
@@ -58,15 +58,30 @@ inline uint32_t get_cc(uint32_t xcc_id) {
 
 int main(int argc, char **argv) {
 
-    printf("K1 0<->2 2<->4 4<->6 6<->0\n"); // utilize all links
-    printf("K2 %d->%d\n", K2_PINNED_XCD, K2_PINNED_HBM);
+    // K1 on even XCDs and HBMs while K2 on specific odd XCD and HBM to avoid LLC channel conflict 
+    cout << "K1 on all 8 links: "
+         << "CC0<->CC2" << " " << "CC2<->CC4" << " " << "CC4<->CC6" << " " << "CC6<->CC0" << " "
+         << "using even XCDs and HBMs only."
+         << "\n" << flush;
+    cout << "K2 on: " << "CC" << get_cc(K2_PINNED_XCD) << "->" << "CC" << get_cc(K2_PINNED_HBM) << " "
+         << "using XCD" << K2_PINNED_XCD << "->" << "HBM" << K2_PINNED_HBM
+         << "\n" << flush; 
+
+    // Assertions
+    assert(K2_BPX_MIN > 1); // In K1 in fused kernel k, two bpx are utilized for two outgoing links of xcd
 
     std::random_device rd;
     std::mt19937 g(rd());
     
     const size_t cl_bytes = 128;
 
-    /* K1 data allocation */ 
+
+    // =============================================================================================
+    // K1 SETUP
+    // =============================================================================================
+
+
+    // Data allocation 
     dtype *dbuf_base = nullptr;
 
     const size_t LEN = (1 << 16);
@@ -85,92 +100,31 @@ int main(int argc, char **argv) {
     vector<uint32_t> cl_home_xcd(n_cl_dbuf, (uint32_t)-1);
     vector<vector<uint32_t>> xcd_cls(XCD_NUM);
 
-    /* K1 data home identification */
-    {
-        uint32_t *d_cycles = nullptr;
-        GPU_ERROR(hipMalloc(&d_cycles, n_dtype_dbuf * (size_t)XCD_NUM * sizeof(uint32_t)));
+    // Data home identification
+    if (k1::home_identification(
+            dbuf_base,
+            n_dtype_dbuf,
+            n_cl_dbuf,
+            cl_size,
+            cl_bytes,
+            skip_factor,
+            dtype_home_xcd,
+            cl_home_xcd,
+            xcd_dtypes,
+            xcd_cls) == -1)
+        return -1;
 
-        void *kernel_args[] = {
-            (void *)&dbuf_base,
-            (void *)&d_cycles,
-            (void *)&n_dtype_dbuf,
-        };
 
-        GPU_ERROR(hipLaunchCooperativeKernel(
-            _identify_home<dtype>, dim3(1 * XCD_NUM), dim3(128 / sizeof(dtype)),
-            kernel_args, 0, 0));
+    // =============================================================================================
+    // K2 SETUP
+    // =============================================================================================
 
-        GPU_ERROR(hipDeviceSynchronize());
-
-        vector<vector<uint32_t>> h_cycles(XCD_NUM, vector<uint32_t>(n_dtype_dbuf));
-        for (int x = 0; x < XCD_NUM; x++) {
-            GPU_ERROR(hipMemcpy(h_cycles[x].data(),
-                                d_cycles + (size_t)x * n_dtype_dbuf,
-                                sizeof(uint32_t) * n_dtype_dbuf,
-                                hipMemcpyDeviceToHost));
-        }
-
-        for (size_t k = 0; k < n_dtype_dbuf; k++) {
-            uint32_t min_cycles = 0xFFFFFFFF;
-            int min_xcc = -1;
-            for (int x = 0; x < XCD_NUM; x++) {
-                uint32_t c = h_cycles[x][k];
-                if (c < min_cycles) {
-                    min_cycles = c;
-                    min_xcc = x;
-                }
-                #if DEBUG_LEVEL >= 3
-                cout << "dtype " << k << " xcc " << x << " cycles " << c << "\n";
-                #endif
-            }
-
-            dtype_home_xcd[k] = min_xcc;
-            xcd_dtypes[min_xcc].push_back((uint32_t)k);
-
-            if (k % (skip_factor * cl_size) == 0) {
-                size_t cl_idx = k / (skip_factor * cl_size);
-                if (cl_idx < n_cl_dbuf) {
-                    cl_home_xcd[cl_idx] = min_xcc;
-                    xcd_cls[min_xcc].push_back((uint32_t)cl_idx);
-                }
-            }
-        }
-
-        GPU_ERROR(hipFree(d_cycles));
-    
-        #if DEBUG_LEVEL >= 2
-        for (int x = 0; x < XCD_NUM; x++) {
-            cout << "XCD " << x << " has " << xcd_dtypes[x].size() << " dtypes.\n";
-            cout << "XCD " << x << " has " << xcd_cls[x].size() << " cache lines.\n";
-            cout << "XCD " << x << " has " << xcd_cls[x].size() * cl_bytes / (1024 * 1024) << " MB of pinned HBM chunks.\n";
-        }
-        #endif
-    
-        // boundary check
-        // single-CC LLC range is 1MB - 16MB
-        for (int x = 0; x < XCD_NUM; x++) {
-
-            if (xcd_cls[x].size() * cl_bytes < (1 * 1024 * 1024)) {
-                cout << "K1 pinned HBM" << "[" << x << "]" << " chunks size " << xcd_cls[x].size() * cl_bytes / (1024 * 1024) << " MB" //
-                    << " is smaller than 1 MB" << "\n" << flush;
-                return -1;
-            }
-
-            if (xcd_cls[x].size() * cl_bytes > (16 * 1024 * 1024)) {
-                cout << "K1 pinned HBM" << "[" << x << "]" << " chunks size " << xcd_cls[x].size() * cl_bytes / (1024 * 1024) << " MB" //
-                    << " is larger than 16 MB" << "\n" << flush;
-                return -1;
-            }
-
-        }
-    }
-
-    /* K2 data allocation */
 
     const int k2_n_datas = 4;
 
     const long long k2_n_pages = (128 << 6); // 16GB per input data
     // const long long k2_n_pages = 128; // 256MB per input data
+    
     const int k2_page_size = (2 * 1024 * 1024); // 2MB huge page
     const long long k2_data_size = (k2_n_pages * k2_page_size);
 
@@ -187,73 +141,15 @@ int main(int argc, char **argv) {
     vector<vector<int>> k2_h_home(k2_n_datas, vector<int>(k2_n_chunks));
     vector<vector<size_t>> k2_h_xcd_chunks_size(k2_n_datas, vector<size_t>(XCD_NUM, 0)); // count #chunks per-data per-xcd. init to 0
 
-    /* K2 data home identification */
-    {
-        // per-data, per-xcd, per-chunk. record cycles for home identification
-        // last two dimensions are flattened
-        vector<uint32_t*> d_cycles(k2_n_datas);
-        for (int i = 0; i < k2_n_datas; i++) {
-            GPU_ERROR(hipMalloc((void**)&d_cycles[i], sizeof(uint32_t) * XCD_NUM * k2_n_chunks));
-            #if DEBUG_LEVEL >= 2
-            printf("allocated d_cycles[%d] array[%d][%zu]\n", i, XCD_NUM, k2_n_chunks);
-            #endif
-        }
-
-        for (int i = 0; i < k2_n_datas; i++) {
-            #if DEBUG_LEVEL >= 2
-            printf("Identifying home xcd for data[%d]...\n", i);
-            #endif
-
-            void *kernel_args[] = {
-                (void*)&k2_d_data[i],
-                (void*)&k2_data_size,
-                (void*)&d_cycles[i], // XCD_NUM * n_chunks
-                (void*)&k2_n_chunks
-            };
-
-            GPU_ERROR(hipLaunchCooperativeKernel(
-                identify_home,
-                dim3(1 * XCD_NUM), dim3(128), 
-                kernel_args, 0, 0
-            ));
-            GPU_ERROR(hipDeviceSynchronize());
-
-            /* retrieve and process results */
-
-            vector<vector<uint32_t>> h_cycles(XCD_NUM, vector<uint32_t>(k2_n_chunks));
-            for (int x = 0; x < XCD_NUM; x++) {
-                GPU_ERROR(hipMemcpy(
-                    h_cycles[x].data(),
-                    &d_cycles[i][x * k2_n_chunks],
-                    sizeof(uint32_t) * k2_n_chunks,
-                    hipMemcpyDeviceToHost
-                ));
-            }
-
-            for (size_t k = 0; k < k2_n_chunks; k++) {
-                uint32_t min_cycles = 0xFFFFFFFF;
-                int min_xcc = -1;
-                for (int x = 0; x < XCD_NUM; x++) {
-                    uint32_t c = h_cycles[x][k];
-                    if (c < min_cycles) {
-                        min_cycles = c;
-                        min_xcc = x;
-                    }
-                }
-                k2_h_home[i][k] = min_xcc;
-                k2_h_xcd_chunks_size[i][min_xcc]++;
-                #if DEBUG_LEVEL >= 3
-                printf("data[%d] chunk[%zu]: home xcd %d\n", i, k, k2_h_home[i][k]);
-                #endif
-            }
-            #if DEBUG_LEVEL >= 2
-            for (int x = 0; x < XCD_NUM; x++) {
-                printf("data[%d] xcd %d: n_chunks %zu\n", i, x, k2_h_xcd_chunks_size[i][x]);
-            }
-            printf("\n");
-            #endif
-        }
-    }
+    // Data home identification
+    if (k2::home_identification(
+            k2_d_data,
+            k2_data_size,
+            k2_n_chunks,
+            k2_n_datas,
+            k2_h_home,
+            k2_h_xcd_chunks_size) == -1)
+        return -1;
 
     /* group per-xcd chunk pointers */
     
@@ -313,21 +209,26 @@ int main(int argc, char **argv) {
     GPU_ERROR(hipMemcpy(k2_d_xcd_chunks_size, k2_xcd_chunks_size.data(), sizeof(size_t) * XCD_NUM, hipMemcpyHostToDevice));
 
     #if DEBUG_LEVEL >= 1
-    cout << "K2" << " " << K2_PINNED_XCD << "->" << K2_PINNED_HBM << "(" << get_cc(K2_PINNED_HBM) << ")" << " " //
+    cout << "K2" << " "
          << k2_n_datas * k2_data_size / (1024 * 1024) << " MB " //
          << (k2_h_xcd_chunks_size[0][K2_PINNED_HBM] + k2_h_xcd_chunks_size[1][K2_PINNED_HBM] + k2_h_xcd_chunks_size[2][K2_PINNED_HBM] + k2_h_xcd_chunks_size[3][K2_PINNED_HBM]) * k2_chunk_size / (1024 * 1024) << " MB " //
          << "\n" << flush;
     #endif
 
+
+    // =============================================================================================
+    // KERNEL LAUNCH
+    // =============================================================================================
+
+
     unsigned int clock = getGPUClock();
 
-    assert(K2_BPX_MIN > 1); // fir bidirectional link util per xcd
+    const int EIGHT = 8; // k1 for 8 links
+    
     for (int k2_bpx = K2_BPX_MIN; k2_bpx <= K2_BPX_MAX; k2_bpx++) {
 
-        MeasurementSeries times0, times1, times2, times3, times4, times5, times6, times7; 
-
         const int64_t iters = max(LEN, (int64_t)100000);
-
+        MeasurementSeries times0, times1, times2, times3, times4, times5, times6, times7; 
         MeasurementSeries k2_bws;
 
         for (int epoch = 0; epoch < 21; epoch++) {
@@ -338,37 +239,19 @@ int main(int argc, char **argv) {
             GPU_ERROR(hipMallocManaged(&buf, n_dtype_dbuf * sizeof(dtype)));
             std::memset(buf, 0, n_dtype_dbuf * sizeof(dtype));
 
-            // 준열 수정: buf를 8개
-            const int EIGHT = 8;
-            // vector<dtype*> buf_vector(EIGHT, nullptr);
-            // for (int v = 0; v < EIGHT; v++) {
-            //     GPU_ERROR(hipMallocManaged(&buf_vector[v], n_dtype_dbuf * sizeof(dtype)));
-            //     std::memset(buf_vector[v], 0, n_dtype_dbuf * sizeof(dtype));
-            // }
-
             dtype *dummy_buf = nullptr;
             GPU_ERROR(hipMallocManaged(&dummy_buf, sizeof(dtype)));
             dummy_buf[0] = 0;
 
-            // 준열 수정: seq도 8개
+            // Important! Since only HBM 0 2 4 6 is used, buffer map [0-7] logic: CC 0 1 2 3 0 1 2 3
             vector<dtype*> dbuf_start_vector(EIGHT, nullptr);
 
             for (int v = 0; v < EIGHT; v++) {
-                // dtype *buf = buf_vector[v];
-                vector<uint32_t> seq(LEN);
 
                 // Choose LEN cache lines from PINNED_CC, shuffle them
-                // vector<uint32_t> seq(LEN);
-                // for (int64_t i = 0; i < LEN; i++) {
-                //     seq[i] = xcd_cls[K1_PINNED_HBM][(size_t)i];
-                // }
-                // shuffle(seq.begin(), seq.end(), g);
-
+                vector<uint32_t> seq(LEN);
                 for (int64_t i = 0; i < LEN; i++) {
-                    // 중요! v%4*2 해야 0,2,4,6번 xcd만 골라서 쓰게 됨
-                    // 즉 버퍼 매핑 로직[0-7]: CC 0 1 2 3 0 1 2 3
-                    // 중요! v/4를 곱해줘야 0:LEN-1, LEN:2*LEN-1 이렇게 2번 돌게 됨 // 수정. 굳이?
-                    // seq[i] = xcd_cls[(v%4)*2][(size_t)i*(v/4)];
+                    // Important! v%4*2 => HBM 0 2 4 6 0 2 4 6
                     seq[i] = xcd_cls[(v%4)*2][(size_t)i];
                 }
                 shuffle(seq.begin(), seq.end(), g);
@@ -430,13 +313,14 @@ int main(int argc, char **argv) {
             GPU_ERROR(hipDeviceSynchronize());
 
             // K1 warmup
-            // two tb for xcd for bidirectional link utilization
-            k1<dtype><<<XCD_NUM*2, 1>>>(
+            // two tb per xcd for two outgoing links utilization
+            const int TWO = 2;
+            k1::k<dtype><<<XCD_NUM * TWO, 1>>>(
                 dbuf_start_vector[0], dbuf_start_vector[1], dbuf_start_vector[2], dbuf_start_vector[3],
                 dbuf_start_vector[4], dbuf_start_vector[5], dbuf_start_vector[6], dbuf_start_vector[7],
                 dummy_buf, iters
             );
-            k1<dtype><<<XCD_NUM*2, 1>>>(
+            k1::k<dtype><<<XCD_NUM * TWO, 1>>>(
                 dbuf_start_vector[0], dbuf_start_vector[1], dbuf_start_vector[2], dbuf_start_vector[3],
                 dbuf_start_vector[4], dbuf_start_vector[5], dbuf_start_vector[6], dbuf_start_vector[7],
                 dummy_buf, iters
@@ -444,23 +328,29 @@ int main(int argc, char **argv) {
 
             GPU_ERROR(hipDeviceSynchronize());
 
-            /* K2 thread block configuration */
+
+            /***************************************************************************************
+             * K2 THREAD BLOCK CONFIGURATION
+             * This part is important to saturate link bandwidth 
+             * Different from *original* code, now each thread block loads (tb_size/128) chunks per iter
+             * To do so, k2_n_warps_per_block is set accordingly
+             **************************************************************************************/
+
 
             const int k2_n_blocks = (k2_bpx * XCD_NUM);
             const int k2_n_threads_per_warp = 64;
 
+            // *original* code
             // Since each thread loads 16B per iter, `k2_n_warps_per_block` set s.t. each tb loads 1 chunk per iter
-            const int k2_n_warps_per_block = (k2_chunk_size / (k2_n_threads_per_warp * 16)); 
-            assert((k2_n_threads_per_warp * k2_n_warps_per_block) <= 1024); // assert max 1024 threads per block
+            // const int k2_n_warps_per_block = (k2_chunk_size / (k2_n_threads_per_warp * 16)); 
+
+            // modified code
+            const int k2_n_warps_per_block = K2_TPB / k2_n_threads_per_warp;
 
             const int k2_n_threads_per_block = (k2_n_warps_per_block * k2_n_threads_per_warp);
+            assert(k2_n_threads_per_block % 128 == 0); // assert multiple 128 => each block loads multiples of 1 chunk per iter
+            assert(k2_n_threads_per_block <= 1024); // assert max 1024 threads per block
             const int k2_total_threads = (k2_n_blocks * k2_n_threads_per_block);
-
-            /* fused kernel launch */
-
-            // uint32_t *d_k1_startClk, *d_k1_stopClk;
-            // GPU_ERROR(hipMalloc(&d_k1_startClk, sizeof(uint32_t) * iters));
-            // GPU_ERROR(hipMalloc(&d_k1_stopClk, sizeof(uint32_t) * iters));
 
             uint32_t *d_k1_startClk, *d_k1_stopClk; 
             GPU_ERROR(hipMalloc((void**)&d_k1_startClk, sizeof(uint32_t) * EIGHT ));
@@ -471,6 +361,21 @@ int main(int argc, char **argv) {
             GPU_ERROR(hipMalloc((void**)&d_k2_startClk, sizeof(uint32_t) * k2_bpx ));
             GPU_ERROR(hipMalloc((void**)&d_k2_stopClk, sizeof(uint32_t) * k2_bpx ));
 
+
+            /***************************************************************************************
+             * END K2 THREAD BLOCK CONFIGURATION
+             ***************************************************************************************/
+
+
+            #if DEBUG_LEVEL >= 1
+            cout << "Launching fused kernel k with"
+                 << " n_chunks_per_block_per_iter=" << (k2_chunk_size / (k2_n_threads_per_block * 16))
+                 << " k2_n_threads_per_block=" << k2_n_threads_per_block 
+                 << " k2_n_blocks=" << k2_n_blocks 
+                 << "\n" << flush;
+            #endif
+
+            // Launch fused kernel k
             k<dtype><<<k2_n_blocks, k2_n_threads_per_block>>>(
                 dbuf_start_vector[0], dbuf_start_vector[1], dbuf_start_vector[2], dbuf_start_vector[3],
                 dbuf_start_vector[4], dbuf_start_vector[5], dbuf_start_vector[6], dbuf_start_vector[7],
@@ -484,6 +389,7 @@ int main(int argc, char **argv) {
             GPU_ERROR(hipGetLastError());
 
             // parse k2 results 
+
             vector<uint32_t> h_k2_cycles_start(k2_bpx);
             vector<uint32_t> h_k2_cycles_stop(k2_bpx);
             GPU_ERROR(hipMemcpy(h_k2_cycles_start.data(), d_k2_startClk, sizeof(uint32_t) * k2_bpx, hipMemcpyDeviceToHost));
@@ -507,7 +413,15 @@ int main(int argc, char **argv) {
                     max_xcd_cycles_stop = h_k2_cycles_stop[tbid_in_xcd];
                 }
             }
-            // global bw
+
+
+            /***************************************************************************************
+             * K2 GLOBAL BANDWIDTH CALCULATION
+             * This part is confusing but don't manipulate *bytes*
+             * For example, bytes *= (k2_n_threads_per_block / 128) is not needed
+             ***************************************************************************************/
+
+            
             // bw based on max cycles among tbs in this xcd
             double bytes = (double)(k2_d_xcd_chunks_size[K2_PINNED_HBM] * k2_chunk_size * k2_n_datas); // total bytes accessed by this xcd
             const double global_time_sec = (double)(max_xcd_cycles_stop - min_xcd_cycles_start) / ((double)clock * 1e6);
@@ -526,14 +440,6 @@ int main(int argc, char **argv) {
             GPU_ERROR(hipMemcpy(h_start.data(), d_k1_startClk, sizeof(uint32_t) * EIGHT, hipMemcpyDeviceToHost));
             GPU_ERROR(hipMemcpy(h_stop.data(), d_k1_stopClk, sizeof(uint32_t) * EIGHT, hipMemcpyDeviceToHost));
 
-            // for (int64_t i = 0; i < iters; i++) {
-            //     uint32_t start_cycles = h_start[(size_t)i];
-            //     uint32_t stop_cycles  = h_stop[(size_t)i];
-            //     uint32_t elapsed = stop_cycles - start_cycles;
-            //     printf("K1 iter %lld: start %u stop %u elapsed %u\n", i, start_cycles, stop_cycles, elapsed);
-            //     // times.add((double)elapsed / (double)clock);
-            // }
-
             // 일단 전체 elapsed cycle을 잡아보자. 더 finer-grained한 측정은 나중에
             times0.add((double)(h_stop[0] - h_start[0]) / ((double)clock * 1e6));
             times1.add((double)(h_stop[1] - h_start[1]) / ((double)clock * 1e6));
@@ -551,7 +457,6 @@ int main(int argc, char **argv) {
             GPU_ERROR(hipFree(buf));
 
             GPU_ERROR(hipFree(dummy_buf));
-            // GPU_ERROR(hipFree(dbuf_base));
 
         } /* >8 end epoch */
 
