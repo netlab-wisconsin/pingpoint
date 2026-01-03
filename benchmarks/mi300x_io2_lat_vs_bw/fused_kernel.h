@@ -6,9 +6,7 @@
 
 namespace cg = cooperative_groups;
 
-#ifndef DEBUG_LEVEL
-#define DEBUG_LEVEL 0
-#endif
+#define DEBUG_KERNEL_LEVEL 0
 
 // per-xcd barrier
 __device__ int d_xcd_barrier_count[XCD_NUM] = {0};
@@ -64,7 +62,7 @@ __global__ void k(
     asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=r"(xcc_id));
 
     if (tid == 0) {
-        #if DEBUG_LEVEL >= 1
+        #if DEBUG_KERNEL_LEVEL >= 1
         printf("bid %d xcd %d tbid_in_xcd %d\n", bid, xcc_id, tbid_in_xcd);
         #endif
     }
@@ -74,7 +72,7 @@ __global__ void k(
         // prelude: for k1, only the first two tb in xcd runs -- using single thread (threadIdx.x 0)
         int tidx = threadIdx.x + blockIdx.x * blockDim.x;
         if (tbid_in_xcd > 1 || threadIdx.x > 0) return;
-        #if DEBUG_LEVEL >= 1
+        #if DEBUG_KERNEL_LEVEL >= 1
         printf("k1 xcd %d tbid_in_xcd %d tidx %d\n", xcc_id, tbid_in_xcd, tidx);
         #endif
 
@@ -127,7 +125,7 @@ __global__ void k(
         const size_t n_chunks_per_iter_per_tb = (blockDim.x / (k2_chunk_size / 16));
         size_t n_iter = k2_chunks_size[k2_hbm] / (n_tbs_in_xcd * n_chunks_per_iter_per_tb);
         if (tid == 0) {
-            #if DEBUG_LEVEL >= 1
+            #if DEBUG_KERNEL_LEVEL >= 1
             printf("bid %d (tbid_in_xcd %d) on xcc %d: n_iter %zu\n", bid, tbid_in_xcd, xcc_id, n_iter);
             #endif
         }

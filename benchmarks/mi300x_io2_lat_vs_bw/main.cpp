@@ -369,7 +369,7 @@ int main(int argc, char **argv) {
 
             #if DEBUG_LEVEL >= 1
             cout << "Launching fused kernel k with"
-                 << " n_chunks_per_block_per_iter=" << (k2_chunk_size / (k2_n_threads_per_block * 16))
+                 << " n_chunks_per_block_per_iter=" << ((k2_n_threads_per_block * 16) / k2_chunk_size)
                  << " k2_n_threads_per_block=" << k2_n_threads_per_block 
                  << " k2_n_blocks=" << k2_n_blocks 
                  << "\n" << flush;

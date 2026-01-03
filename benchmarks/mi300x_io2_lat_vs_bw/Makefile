@@ -14,7 +14,7 @@ K2_BPX_MIN 		:= 2	# Min nblocks per xcd when launching fused kernel k. Must be >
 K2_BPX_MAX 		:= 160	# Max nblocks per xcd when launching fused kernel k
 K2_TPB 			:= 512
 
-DEBUG_LEVEL := 1
+DEBUG_LEVEL := 0
 
 # latency-sensitive kernels run at all links as 1 hop traffic
 # bw-intensive kernel runs with cc(pinned xcd) -> cc(pinned hbm) traffic
