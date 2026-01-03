@@ -18,9 +18,9 @@ DEBUG_LEVEL := 0
 
 # latency-sensitive kernels run at all links as 1 hop traffic
 # bw-intensive kernel runs with cc(pinned xcd) -> cc(pinned hbm) traffic
-all: $(BIN_DIR)/lat_all_all_bw_$(K2_PINNED_XCD)_$(K2_PINNED_HBM)
+all: $(BIN_DIR)/lat_all_all_bw_$(K2_PINNED_XCD)_$(K2_PINNED_HBM)_$(K2_TPB)
 
-$(BIN_DIR)/lat_all_all_bw_$(K2_PINNED_XCD)_$(K2_PINNED_HBM): main.cpp
+$(BIN_DIR)/lat_all_all_bw_$(K2_PINNED_XCD)_$(K2_PINNED_HBM)_$(K2_TPB): main.cpp
 	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) \
 	-DK2_PINNED_XCD=$(K2_PINNED_XCD) -DK2_PINNED_HBM=$(K2_PINNED_HBM) \
 	-DK2_BPX_MAX=$(K2_BPX_MAX) -DK2_BPX_MIN=$(K2_BPX_MIN) \

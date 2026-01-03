@@ -4,18 +4,20 @@ BASE_DIR=$(pwd)
 BIN_DIR="$BASE_DIR/bin"
 RESULTS_DIR="$BASE_DIR/results/0102/saturation4"
 
-${BIN_DIR}/lat_all_all_bw_3_1 |& tee ${RESULTS_DIR}/31.v5
-${BIN_DIR}/lat_all_all_bw_3_5 |& tee ${RESULTS_DIR}/35.v5
-${BIN_DIR}/lat_all_all_bw_3_7 |& tee ${RESULTS_DIR}/37.v5
+for tpb in 128 256 512; do
+    ${BIN_DIR}/lat_all_all_bw_3_1_${tpb} |& tee ${RESULTS_DIR}/31_${tpb}.v5
+    ${BIN_DIR}/lat_all_all_bw_3_5_${tpb} |& tee ${RESULTS_DIR}/35_${tpb}.v5
+    ${BIN_DIR}/lat_all_all_bw_3_7_${tpb} |& tee ${RESULTS_DIR}/37_${tpb}.v5
 
-${BIN_DIR}/lat_all_all_bw_5_1 |& tee ${RESULTS_DIR}/51.v5
-${BIN_DIR}/lat_all_all_bw_5_3 |& tee ${RESULTS_DIR}/53.v5
-${BIN_DIR}/lat_all_all_bw_5_7 |& tee ${RESULTS_DIR}/57.v5
+    ${BIN_DIR}/lat_all_all_bw_5_1_${tpb} |& tee ${RESULTS_DIR}/51_${tpb}.v5
+    ${BIN_DIR}/lat_all_all_bw_5_3_${tpb} |& tee ${RESULTS_DIR}/53_${tpb}.v5
+    ${BIN_DIR}/lat_all_all_bw_5_7_${tpb} |& tee ${RESULTS_DIR}/57_${tpb}.v5
 
-${BIN_DIR}/lat_all_all_bw_7_1 |& tee ${RESULTS_DIR}/71.v5
-${BIN_DIR}/lat_all_all_bw_7_3 |& tee ${RESULTS_DIR}/73.v5
-${BIN_DIR}/lat_all_all_bw_7_5 |& tee ${RESULTS_DIR}/75.v5
+    ${BIN_DIR}/lat_all_all_bw_7_1_${tpb} |& tee ${RESULTS_DIR}/71_${tpb}.v5
+    ${BIN_DIR}/lat_all_all_bw_7_3_${tpb} |& tee ${RESULTS_DIR}/73_${tpb}.v5
+    ${BIN_DIR}/lat_all_all_bw_7_5_${tpb} |& tee ${RESULTS_DIR}/75_${tpb}.v5
 
-${BIN_DIR}/lat_all_all_bw_1_3 |& tee ${RESULTS_DIR}/13.v5
-${BIN_DIR}/lat_all_all_bw_1_5 |& tee ${RESULTS_DIR}/15.v5
-${BIN_DIR}/lat_all_all_bw_1_7 |& tee ${RESULTS_DIR}/17.v5
+    ${BIN_DIR}/lat_all_all_bw_1_3_${tpb} |& tee ${RESULTS_DIR}/13_${tpb}.v5
+    ${BIN_DIR}/lat_all_all_bw_1_5_${tpb} |& tee ${RESULTS_DIR}/15_${tpb}.v5
+    ${BIN_DIR}/lat_all_all_bw_1_7_${tpb} |& tee ${RESULTS_DIR}/17_${tpb}.v5
+done

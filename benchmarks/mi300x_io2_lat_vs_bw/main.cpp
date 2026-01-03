@@ -372,6 +372,7 @@ int main(int argc, char **argv) {
                  << " n_chunks_per_block_per_iter=" << ((k2_n_threads_per_block * 16) / k2_chunk_size)
                  << " k2_n_threads_per_block=" << k2_n_threads_per_block 
                  << " k2_n_blocks=" << k2_n_blocks 
+                 << " n_chunks_per_iter_per_tb=" << ((k2_n_threads_per_block * 16) / k2_chunk_size)
                  << "\n" << flush;
             #endif
 
