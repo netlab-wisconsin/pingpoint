@@ -20,6 +20,11 @@ for t1 in "${TPB_LIST[@]}"; do
 done
 
 for t1 in "${TPB_LIST[@]}"; do
-    # additionally, make k1 only by setting k2 max tpb to 0
-    make TPB=$t1 K1_MAX_TPB=$t1 K2_MAX_TPB=0
+    for t2 in "${K1_MAX_TPB_LIST[@]}"; do
+        if [ $t2 -gt $t1 ]; then
+            continue
+        fi
+        # additionally, make k2 only by setting k1 max tpb to 0
+        make TPB=$t1 K1_MAX_TPB=$t2 K2_MAX_TPB=0
+    done
 done

@@ -108,17 +108,21 @@ __global__ void k(
         float4 reg_in1, reg_in2, reg_in3, reg_in4;
         float sink0 = 0, sink1 = 0, sink2 = 0, sink3 = 0;
 
+        const size_t n_floats_per_chunk = k2_chunk_size / sizeof(float);
         const size_t n_chunks_per_iter_per_tb = (blockDim.x / (k2_chunk_size / 16));
         size_t n_iter = k2_nchunks / (n_tbs_in_xcd * n_chunks_per_iter_per_tb);
-
         for (size_t iter = 0; iter < n_iter; iter++) {
             for (size_t c = 0; c < n_chunks_per_iter_per_tb; c++) {
                 size_t chunk_idx = c + tbid_in_xcd * n_chunks_per_iter_per_tb + iter * n_tbs_in_xcd;
+                #if DEBUG
+                printf("K2: xcc_id=%u, tbid_in_xcd=%u, tid=%u, iter=%zu, c=%zu, chunk_idx=%zu\n", xcc_id, tbid_in_xcd, tid, iter, c, chunk_idx);
+                #endif
 
-                float4 *ptr_in1 = reinterpret_cast<float4*>(&k2_chunks1[chunk_idx]);
-                float4 *ptr_in2 = reinterpret_cast<float4*>(&k2_chunks2[chunk_idx]);
-                float4 *ptr_in3 = reinterpret_cast<float4*>(&k2_chunks3[chunk_idx]);
-                float4 *ptr_in4 = reinterpret_cast<float4*>(&k2_chunks4[chunk_idx]);
+                const size_t chunk_idx_to_float_idx = chunk_idx * n_floats_per_chunk;
+                float4 *ptr_in1 = reinterpret_cast<float4*>(&k2_chunks1[chunk_idx_to_float_idx]);
+                float4 *ptr_in2 = reinterpret_cast<float4*>(&k2_chunks2[chunk_idx_to_float_idx]);
+                float4 *ptr_in3 = reinterpret_cast<float4*>(&k2_chunks3[chunk_idx_to_float_idx]);
+                float4 *ptr_in4 = reinterpret_cast<float4*>(&k2_chunks4[chunk_idx_to_float_idx]);
                 
                 asm volatile(
                     "flat_load_dwordx4 %[OUT_D1],  %[IN_D1]\n\t"
@@ -194,7 +198,7 @@ int main() {
     
     // --- 4. Device Alloc & Prep (K2 - Shuffled Chunking Logic) ---
     float *d_k2_chunks1, *d_k2_chunks2, *d_k2_chunks3, *d_k2_chunks4;
-    size_t k2_chunks_bufsize = sizeof(float) * num_k2_chunks * CHUNK_SIZE;
+    size_t k2_chunks_bufsize = num_k2_chunks * CHUNK_SIZE;
     HIP_CHECK(hipMalloc(&d_k2_chunks1, k2_chunks_bufsize));
     HIP_CHECK(hipMalloc(&d_k2_chunks2, k2_chunks_bufsize));
     HIP_CHECK(hipMalloc(&d_k2_chunks3, k2_chunks_bufsize));
@@ -212,7 +216,7 @@ int main() {
         #if DEBUG
         std::cout << "Launching Fused Kernel over " << NB_EPOCH << " epochs..." << std::endl;
         std::cout << "bpx:          " << bpx << std::endl;
-        std::cout << "gridDim.x:    " << BPX * XCD_NUM << std::endl;
+        std::cout << "gridDim.x:    " << bpx * XCD_NUM << std::endl;
         std::cout << "blockDim.x:   " << TPB << std::endl;
         #endif
 
