@@ -13,11 +13,11 @@ TPB   		:= 128
 K1_MAX_TPB	:= 128
 K2_MAX_TPB	:= 128
 
-all: $(BIN_DIR)/amo_hol_blocking_$(TPB)_$(K1_MAX_TPB)_$(K2_MAX_TPB)
+all: $(BIN_DIR)/amo_$(TPB)_$(K1_MAX_TPB)_$(K2_MAX_TPB)
 
 # fused bmk testing amo + bw
-# amo_hol_blocking $(tpb) $(k1 max tpb) $(k2 max tpb)
-$(BIN_DIR)/amo_hol_blocking_$(TPB)_$(K1_MAX_TPB)_$(K2_MAX_TPB): main.cpp
+# amo $(tpb) $(k1 max tpb) $(k2 max tpb)
+$(BIN_DIR)/amo_$(TPB)_$(K1_MAX_TPB)_$(K2_MAX_TPB): main.cpp
 	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) \
 	-DTPB=$(TPB) -DK1_MAX_TPB=$(K1_MAX_TPB) -DK2_MAX_TPB=$(K2_MAX_TPB) \
 	-o $@ $<
@@ -28,5 +28,5 @@ $(BIN_DIR)/hist: hist.cpp
 	-o $@ $<
 
 clean: 
-	rm -f $(BIN_DIR)/amo_hol_blocking_*
+	rm -f $(BIN_DIR)/amo_*
 	rm -f $(BIN_DIR)/hist

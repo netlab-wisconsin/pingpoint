@@ -50,7 +50,7 @@ __global__ void k(
     float* k1_imageData, int* k1_histogram, size_t k1_totalPixels, int k1_channels, int k1_numBins, uint32_t *k1_clk, const int k1_max_tpb,
     /* k2 args */
     float *k2_chunks1, float *k2_chunks2, float *k2_chunks3, float *k2_chunks4,
-    const size_t k2_nchunks, const size_t k2_chunk_size, const int k2_max_tpb)
+    float *k2_sink, const size_t k2_nchunks, const size_t k2_chunk_size, const int k2_max_tpb)
 {
     // ...existing code...
     int bid = blockIdx.x;
@@ -141,6 +141,7 @@ __global__ void k(
                 sink3 += reg_in1.w + reg_in2.w + reg_in3.w + reg_in4.w;
             }
         }
+        k2_sink[bid * blockDim.x + tid] = sink0 + sink1 + sink2 + sink3; // Prevent optimization
     }
 }
 
@@ -196,7 +197,7 @@ int main() {
 
     HIP_CHECK(hipMemcpy(d_k1_imageData, h_imageData.data(), dataSizeBytes, hipMemcpyHostToDevice));
     
-    // --- 4. Device Alloc & Prep (K2 - Shuffled Chunking Logic) ---
+    // --- 4. Device Alloc & Prep (K2) ---
     float *d_k2_chunks1, *d_k2_chunks2, *d_k2_chunks3, *d_k2_chunks4;
     size_t k2_chunks_bufsize = num_k2_chunks * CHUNK_SIZE;
     HIP_CHECK(hipMalloc(&d_k2_chunks1, k2_chunks_bufsize));
@@ -204,7 +205,12 @@ int main() {
     HIP_CHECK(hipMalloc(&d_k2_chunks3, k2_chunks_bufsize));
     HIP_CHECK(hipMalloc(&d_k2_chunks4, k2_chunks_bufsize));
 
-    // Initialize K2 dummy data (optional)
+    size_t k2_sink_bufcnt = XCD_NUM * BPX_MAX * K2_MAX_TPB;
+    std::vector<float> h_k2_sink(k2_sink_bufcnt, 0.0f);
+    float *d_k2_sink;
+    HIP_CHECK(hipMalloc(&d_k2_sink, k2_sink_bufcnt * sizeof(float)));
+
+    // Initialize K2 dummy data
     HIP_CHECK(hipMemset(d_k2_chunks1, 0, k2_chunks_bufsize));
     HIP_CHECK(hipMemset(d_k2_chunks2, 0, k2_chunks_bufsize));
     HIP_CHECK(hipMemset(d_k2_chunks3, 0, k2_chunks_bufsize));
@@ -212,6 +218,7 @@ int main() {
 
     // --- 5. Loop ---
     for (int bpx = BPX_STRIDE; bpx <= BPX_MAX; bpx+=BPX_STRIDE) {
+    // for (int bpx = 160; bpx <= BPX_MAX; bpx += BPX_STRIDE) {
 
         #if DEBUG
         std::cout << "Launching Fused Kernel over " << NB_EPOCH << " epochs..." << std::endl;
@@ -237,7 +244,7 @@ int main() {
                 0, 
                 0, 
                 d_k1_imageData, d_k1_histogram, totalPixels, channels, numBins, d_k1_clk, K1_MAX_TPB,
-                d_k2_chunks1, d_k2_chunks2, d_k2_chunks3, d_k2_chunks4,
+                d_k2_chunks1, d_k2_chunks2, d_k2_chunks3, d_k2_chunks4, d_k2_sink,
                 num_k2_chunks, CHUNK_SIZE, K2_MAX_TPB
             );
             HIP_CHECK(hipGetLastError());
@@ -245,6 +252,7 @@ int main() {
 
             // --- 6. Results & Verification ---
             HIP_CHECK(hipMemcpy(h_latencySamples.data(), d_k1_clk, latencySizeBytes, hipMemcpyDeviceToHost));
+            HIP_CHECK(hipMemcpy(h_k2_sink.data(), d_k2_sink, k2_sink_bufcnt * sizeof(float), hipMemcpyDeviceToHost));
 
             // Sort to find percentiles
             std::sort(h_latencySamples.begin(), h_latencySamples.end());
@@ -277,6 +285,7 @@ int main() {
     HIP_CHECK(hipFree(d_k2_chunks2));
     HIP_CHECK(hipFree(d_k2_chunks3));
     HIP_CHECK(hipFree(d_k2_chunks4));
+    HIP_CHECK(hipFree(d_k2_sink));
 
     return 0;
 }
