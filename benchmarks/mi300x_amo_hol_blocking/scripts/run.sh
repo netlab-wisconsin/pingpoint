@@ -24,3 +24,16 @@ for TARGET in "${TARGETS[@]}"; do
     echo "Running benchmark: ${TARGET}"
     ${BIN_DIR}/${TARGET} |& tee ${BASE_DIR}/results/${TARGET}.out
 done
+
+#### K1 only runs
+
+K1_ONLY_TARGETS=(
+  "amo_hol_blocking_128_128_0"
+  "amo_hol_blocking_256_256_0"
+  "amo_hol_blocking_512_512_0"
+)
+
+for TARGET in "${K1_ONLY_TARGETS[@]}"; do
+    echo "Running K1 only benchmark: ${TARGET}"
+    ${BIN_DIR}/${TARGET} |& tee ${BASE_DIR}/results/${TARGET}.out
+done

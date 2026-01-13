@@ -34,6 +34,10 @@ TARGETS=(
   "amo_hol_blocking_512_512_128"
   "amo_hol_blocking_512_512_256"
   "amo_hol_blocking_512_512_512"
+  #### K1 only runs
+  "amo_hol_blocking_128_128_0"
+  "amo_hol_blocking_256_256_0"
+  "amo_hol_blocking_512_512_0"
 )
 
 # Loop through each target and run profiling and analysis

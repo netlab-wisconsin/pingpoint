@@ -10,7 +10,10 @@
 #define XCD_NUM 8
 #define CHUNK_SIZE (2 * 1024) // 2KB chunks
 
-#define BPX_MAX 128
+#define BPX_MAX 160
+#ifndef BPX_STRIDE
+#define BPX_STRIDE 10
+#endif
 
 #ifndef TPB
 #define TPB 512
@@ -204,7 +207,7 @@ int main() {
     HIP_CHECK(hipMemset(d_k2_chunks4, 0, k2_chunks_bufsize));
 
     // --- 5. Loop ---
-    for (int bpx = 1; bpx <= BPX_MAX; bpx++) {
+    for (int bpx = BPX_STRIDE; bpx <= BPX_MAX; bpx+=BPX_STRIDE) {
 
         #if DEBUG
         std::cout << "Launching Fused Kernel over " << NB_EPOCH << " epochs..." << std::endl;

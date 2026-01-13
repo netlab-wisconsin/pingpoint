@@ -16,7 +16,10 @@ for t1 in "${TPB_LIST[@]}"; do
             fi
             make TPB=$t1 K1_MAX_TPB=$t2 K2_MAX_TPB=$t3
         done
-        # additionally, make k1 only by setting k2 max tpb to 0
-        make TPB=$t1 K1_MAX_TPB=$t2 K2_MAX_TPB=0
     done
+done
+
+for t1 in "${TPB_LIST[@]}"; do
+    # additionally, make k1 only by setting k2 max tpb to 0
+    make TPB=$t1 K1_MAX_TPB=$t1 K2_MAX_TPB=0
 done
