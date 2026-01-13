@@ -1,3 +1,8 @@
+// Made critical bugfix: Due to discrepancy in “iter” between k1 and k2
+// k2 ended too early, leaving k1 run in isolated state. 
+// Checked cache bw related rocprof metrics before and after the fix: e.g., 
+// - Avg L2 Cache BW: 40 -> 5000
+
 #include <hip/hip_runtime.h>
 #include <iostream>
 #include <vector>
@@ -43,7 +48,7 @@
 }
 
 // -------------------------------------------------------------------------
-// Fused Kernel (Same as before)
+// Fused Kernel
 // -------------------------------------------------------------------------
 __global__ void k(
     /* k1 args */
@@ -52,7 +57,6 @@ __global__ void k(
     float *k2_chunks1, float *k2_chunks2, float *k2_chunks3, float *k2_chunks4,
     float *k2_sink, const size_t k2_nchunks, const size_t k2_chunk_size, const int k2_max_tpb)
 {
-    // ...existing code...
     int bid = blockIdx.x;
     int tid = threadIdx.x;
     
@@ -105,17 +109,25 @@ __global__ void k(
 
         if (tid >= k2_max_tpb) return;
 
+        int k2_eff_uid = (xcc_id / 2) * k2_max_tpb * n_tbs_in_xcd + tbid_in_xcd * k2_max_tpb + tid;
+
         float4 reg_in1, reg_in2, reg_in3, reg_in4;
         float sink0 = 0, sink1 = 0, sink2 = 0, sink3 = 0;
 
         const size_t n_floats_per_chunk = k2_chunk_size / sizeof(float);
         const size_t n_chunks_per_iter_per_tb = (blockDim.x / (k2_chunk_size / 16));
         size_t n_iter = k2_nchunks / (n_tbs_in_xcd * n_chunks_per_iter_per_tb);
+        #if DEBUG
+        // if (xcc_id == 1 && tbid_in_xcd == 0 && tid == 0) {
+        //     printf("K2: xcc_id=%u, n_tbs_in_xcd=%u, n_chunks_per_iter_per_tb=%zu, n_iter=%zu\n", xcc_id, n_tbs_in_xcd, n_chunks_per_iter_per_tb, n_iter);
+        // }
+        #endif
+
         for (size_t iter = 0; iter < n_iter; iter++) {
             for (size_t c = 0; c < n_chunks_per_iter_per_tb; c++) {
                 size_t chunk_idx = c + tbid_in_xcd * n_chunks_per_iter_per_tb + iter * n_tbs_in_xcd;
                 #if DEBUG
-                printf("K2: xcc_id=%u, tbid_in_xcd=%u, tid=%u, iter=%zu, c=%zu, chunk_idx=%zu\n", xcc_id, tbid_in_xcd, tid, iter, c, chunk_idx);
+                // printf("K2: xcc_id=%u, tbid_in_xcd=%u, tid=%u, iter=%zu, c=%zu, chunk_idx=%zu\n", xcc_id, tbid_in_xcd, tid, iter, c, chunk_idx);
                 #endif
 
                 const size_t chunk_idx_to_float_idx = chunk_idx * n_floats_per_chunk;
@@ -141,7 +153,8 @@ __global__ void k(
                 sink3 += reg_in1.w + reg_in2.w + reg_in3.w + reg_in4.w;
             }
         }
-        k2_sink[bid * blockDim.x + tid] = sink0 + sink1 + sink2 + sink3; // Prevent optimization
+
+        k2_sink[k2_eff_uid] = sink0 + sink1 + sink2 + sink3; // Prevent optimization
     }
 }
 
@@ -153,12 +166,15 @@ int main() {
     
     // K1 Config: 4 XCDs * 512 Threads
     const int k1_active_xcds = 4;
-    const int k1_active_threads = k1_active_xcds * K1_MAX_TPB; // 2048 threads
-    const size_t minLoops = 100000;
-    const size_t totalPixels = k1_active_threads * minLoops; // ~200M pixels
+    const int k1_active_threads = k1_active_xcds * min(TPB, K1_MAX_TPB);
+    const size_t k1_minLoops = 1000;
+    const size_t totalPixels = k1_active_threads * k1_minLoops;
     
     // K2 Config: Chunks
-    const int num_k2_chunks = 1024 * 16; 
+    const int k2_active_xcds = 4;
+    const int k2_active_threads = k2_active_xcds * min(TPB, K2_MAX_TPB) * BPX_MAX; // @june has some flaw, as bpx scales in loop
+    const size_t k2_minLoops = 1000;
+    const int num_k2_chunks = k2_minLoops * (min(TPB, K2_MAX_TPB) / (CHUNK_SIZE/16) ) * BPX_MAX;
 
     size_t dataSizeBytes = totalPixels * channels * sizeof(float);
     size_t histSizeBytes = numBins * sizeof(int);
@@ -205,7 +221,7 @@ int main() {
     HIP_CHECK(hipMalloc(&d_k2_chunks3, k2_chunks_bufsize));
     HIP_CHECK(hipMalloc(&d_k2_chunks4, k2_chunks_bufsize));
 
-    size_t k2_sink_bufcnt = XCD_NUM * BPX_MAX * K2_MAX_TPB;
+    size_t k2_sink_bufcnt = k2_active_xcds * BPX_MAX * K2_MAX_TPB;
     std::vector<float> h_k2_sink(k2_sink_bufcnt, 0.0f);
     float *d_k2_sink;
     HIP_CHECK(hipMalloc(&d_k2_sink, k2_sink_bufcnt * sizeof(float)));
