@@ -15,6 +15,10 @@ using namespace std;
 
 typedef int64_t dtype;
 
+#ifndef BPX
+#define BPX 304
+#endif
+
 // ----------------------------------------------------------------------------------
 // BACKGROUND TRAFFIC KERNEL
 // ----------------------------------------------------------------------------------
@@ -79,6 +83,7 @@ __global__ void pchase(T *buf, T *__restrict__ dummy_buf, int64_t N) {
 }
 
 int main(int argc, char **argv) {
+  printf("Background Traffic Launches %d Blocks\n", BPX);
 
 #ifdef __NVCC__
   GPU_ERROR(hipFuncSetAttribute(reinterpret_cast<const void*>(
@@ -174,7 +179,7 @@ int main(int argc, char **argv) {
       
       // 1. Launch Background Noise (Stream BW - Low Priority)
       // Launches huge work (iters * 10) to ensure it outlives pchase.
-      dim3 bg_grid(304);
+      dim3 bg_grid(BPX);
       dim3 bg_block(1024);
       k_bg<<<bg_grid, bg_block, 0, stream_bw>>>(dbuf, n_dtypes, iters * 10);
 

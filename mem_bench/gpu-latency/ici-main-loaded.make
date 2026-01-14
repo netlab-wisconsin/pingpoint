@@ -13,6 +13,9 @@ PREFIX		:= ici
 SUFFIX		:= loaded
 N 			:= 1
 
+BPX			:= 304
+CCFLAGS   	+= -D BPX=$(BPX)
+
 all: $(BIN_DIR)/$(PREFIX)-$(NAME)-$(SUFFIX)-cc0 \
 	$(BIN_DIR)/$(PREFIX)-$(NAME)-$(SUFFIX)-cc1 \
 	$(BIN_DIR)/$(PREFIX)-$(NAME)-$(SUFFIX)-cc2 \

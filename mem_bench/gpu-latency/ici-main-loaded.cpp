@@ -33,6 +33,10 @@ typedef int64_t dtype;
 #define PINNED_CC   0
 #endif
 
+#ifndef BPX
+#define BPX 304
+#endif
+
 // ----------------------------------------------------------------------------------
 // BACKGROUND TRAFFIC KERNEL
 // ----------------------------------------------------------------------------------
@@ -107,6 +111,7 @@ inline uint32_t get_cc(uint32_t xcc_id) {
 
 int main(int argc, char **argv) {
     printf("Pinned XCD: %d Pinned CC: %d\n", PINNED_XCD, PINNED_CC);
+    printf("Background Traffic Launches %d Blocks\n", BPX);
 
 #ifdef __NVCC__
     GPU_ERROR(hipFuncSetAttribute(reinterpret_cast<const void *>(pchase<dtype>),
@@ -230,7 +235,7 @@ int main(int argc, char **argv) {
 
             // 1. Launch Background Noise (Stream BW - Low Priority)
             // Launches huge work (iters * 10) to ensure it outlives pchase.
-            dim3 bg_grid();
+            dim3 bg_grid(BPX);
             dim3 bg_block(1024);
             k_bg<<<bg_grid, bg_block, 0, stream_bw>>>(dbuf_base, n_dtype_dbuf, iters * 10);
 
