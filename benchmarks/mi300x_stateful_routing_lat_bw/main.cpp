@@ -18,7 +18,7 @@
 #include "../../mem_bench/gpu-clock.cuh"
 #include "../../mem_bench/gpu-error.h"
 
-#include "../mi300x_mapping/bmk1_1tbx.h"
+#include "../tool/bmk1_1tbx.h"
 #include "main.h"
 #include "kernel.h"
 
