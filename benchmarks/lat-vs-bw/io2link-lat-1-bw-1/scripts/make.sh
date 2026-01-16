@@ -20,8 +20,7 @@ K2_PINNED_HBM=7
 K2_BPX_MAX=160
 
 # Values to scale
-# TPB_VALUES=(2 4 8 16 32 64 128)
-TPB_VALUES=(32)
+TPB_VALUES=(2 4 8 16 32 64 128)
 
 echo "Starting compilation for K2_TPB scaling..."
 
