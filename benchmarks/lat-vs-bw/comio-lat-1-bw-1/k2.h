@@ -10,6 +10,9 @@
 using namespace std;
 namespace cg = cooperative_groups;
 
+#define DEBUG_K2_HOME 0
+#define DEBUG_K2_KERNEL 0
+
 #define USE_GLOBAL_BARRIER 0
 
 namespace k2 {
@@ -225,6 +228,74 @@ int home_identification(
     }
 
     return 0;
+}
+
+__global__ void k(
+    uint64_t *k2_chunks1, uint64_t *k2_chunks2, uint64_t *k2_chunks3, uint64_t *k2_chunks4,
+    size_t *k2_offset1, size_t *k2_offset2, size_t *k2_offset3, size_t *k2_offset4,
+    float *k2_sink, size_t *k2_chunks_size, const size_t k2_chunk_size, 
+    const int64_t k2_N, const uint32_t k2_xcd, const uint32_t k2_hbm)
+{
+
+    int bid = blockIdx.x;
+    int tid = threadIdx.x;
+    int uid = bid * blockDim.x + tid;
+
+    int n_tbs_in_xcd = (gridDim.x / XCD_NUM); // number of thread blocks in each xcd
+    int tbid_in_xcd = (bid / XCD_NUM) % n_tbs_in_xcd; // thread block id within xcd
+    int tid_in_xcd = tbid_in_xcd * blockDim.x + tid; // thread id within xcd
+    
+    uint32_t cu_id, xcc_id, se_id;
+    asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID, 8, 4)" : "=r"(cu_id));
+    asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID, 13, 3)" : "=r"(se_id));
+    asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=r"(xcc_id));
+
+    // prelude: for k2, only the threads in xcd 1 run
+    if (xcc_id != k2_xcd) return;
+    #if DEBUG_K2_KERNEL
+    if (tid == 0) {
+        printf("k2 (bid:%d) launched on xcd:%u se:%u cu:%u\n",
+            bid, xcc_id, se_id, cu_id);
+
+    }
+    #endif
+
+    float4 reg_in1, reg_in2, reg_in3, reg_in4;
+    float sink0 = 0, sink1 = 0, sink2 = 0, sink3 = 0;
+
+    const size_t n_chunks_per_iter_per_tb = (blockDim.x / (k2_chunk_size / 16));
+    size_t n_iter = k2_chunks_size[k2_hbm] / (n_tbs_in_xcd * n_chunks_per_iter_per_tb);
+
+    // for (size_t iter = 0; iter < n_iter; iter++) { /* initial logic w/o k2_N */
+    for (int64_t i = 0; i < k2_N; i++) {
+        size_t iter = i % n_iter; // Wrap around using modulo if i exceeds available n_iter
+        for (size_t c = 0; c < n_chunks_per_iter_per_tb; c++) {
+            size_t chunk_idx = c+ tbid_in_xcd * n_chunks_per_iter_per_tb + iter * n_tbs_in_xcd;
+
+            float4 *ptr_in1 = reinterpret_cast<float4*>(k2_chunks1[k2_offset1[k2_hbm] + chunk_idx]);
+            float4 *ptr_in2 = reinterpret_cast<float4*>(k2_chunks2[k2_offset2[k2_hbm] + chunk_idx]);
+            float4 *ptr_in3 = reinterpret_cast<float4*>(k2_chunks3[k2_offset3[k2_hbm] + chunk_idx]);
+            float4 *ptr_in4 = reinterpret_cast<float4*>(k2_chunks4[k2_offset4[k2_hbm] + chunk_idx]);
+            
+            asm volatile(
+                "flat_load_dwordx4 %[OUT_D1],  %[IN_D1]\n\t"
+                "flat_load_dwordx4 %[OUT_C1],  %[IN_C1]\n\t"
+                "flat_load_dwordx4 %[OUT_B1],  %[IN_B1]\n\t"
+                "flat_load_dwordx4 %[OUT_A1],  %[IN_A1]\n\t" 
+                "s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t" // necessary?
+                : [OUT_A1]"=v" (reg_in1), [OUT_B1]"=v" (reg_in2), [OUT_C1]"=v"(reg_in3), [OUT_D1]"=v" (reg_in4)
+                : [IN_A1]"v" (&ptr_in1[tid]), [IN_B1]"v" (&ptr_in2[tid]), [IN_C1]"v" (&ptr_in3[tid]), [IN_D1]"v" (&ptr_in4[tid])
+                : "memory"
+            );
+        }
+
+        sink0 += reg_in1.x + reg_in2.x + reg_in3.x + reg_in4.x;
+        sink1 += reg_in1.y + reg_in2.y + reg_in3.y + reg_in4.y;
+        sink2 += reg_in1.z + reg_in2.z + reg_in3.z + reg_in4.z;
+        sink3 += reg_in1.w + reg_in2.w + reg_in3.w + reg_in4.w;
+    }
+
+    k2_sink[uid] = sink0 + sink1 + sink2 + sink3; // prevent optimization
 }
 
 } // namespace k2

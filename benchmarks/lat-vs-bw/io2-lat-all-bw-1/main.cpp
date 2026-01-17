@@ -13,9 +13,9 @@
 #include <sys/time.h>
 #include <vector>
 
-#include "../../mem_bench/MeasurementSeries.hpp"
-#include "../../mem_bench/dtime.hpp"
-#include "../../mem_bench/gpu-clock.cuh"
+#include "../../../mem_bench/MeasurementSeries.hpp"
+#include "../../../mem_bench/dtime.hpp"
+#include "../../../mem_bench/gpu-clock.cuh"
 
 #include "main.h"
 #include "fused_kernel.h"

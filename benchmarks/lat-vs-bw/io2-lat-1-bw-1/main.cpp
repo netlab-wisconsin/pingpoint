@@ -13,10 +13,10 @@
 #include <sys/time.h>
 #include <vector>
 
-#include "../../mem_bench/MeasurementSeries.hpp"
-#include "../../mem_bench/dtime.hpp"
-#include "../../mem_bench/gpu-clock.cuh"
-#include "../../mem_bench/gpu-error.h"
+#include "../../../mem_bench/MeasurementSeries.hpp"
+#include "../../../mem_bench/dtime.hpp"
+#include "../../../mem_bench/gpu-clock.cuh"
+#include "../../../mem_bench/gpu-error.h"
 
 #include "../tool/bmk1_1tbx.h"
 #include "main.h"
