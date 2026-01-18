@@ -1,13 +1,12 @@
 BASE_DIR := $(shell pwd)
 BIN_DIR  := $(BASE_DIR)/bin
 
-# HIP_HOME 	:= /opt/rocm-7.1.0
-HIP_HOME 	:= /opt/rocm-6.4.1
+HIP_HOME 	:= /opt/rocm-7.1.0
 OPTS 		:= --amdgpu-target=gfx942
 CC 			:= $(HIP_HOME)/bin/hipcc
 CCFLAGS 	:= -fopenmp -O3
 INCLUDES 	:= -I$(HIP_HOME)/include/rocprofiler/ -I$(HIP_HOME)/hsa/include/hsa
-LDFLAGS 	:= -L$(HIP_HOME)/rocprofiler/lib -lrocprofiler64 -lhsa-runtime64 -lrocm_smi64 -ldl
+LDFLAGS 	:= -L$(HIP_HOME)/lib/rocprofiler -lrocprofiler64 -lhsa-runtime64 -lrocm_smi64 -ldl
 
 TPB   		:= 128
 K1_MAX_TPB	:= 128

@@ -13,7 +13,9 @@ namespace cg = cooperative_groups;
 #define DEBUG_K2_HOME 0
 #define DEBUG_K2_KERNEL 0
 
+#ifndef USE_GLOBAL_BARRIER
 #define USE_GLOBAL_BARRIER 0
+#endif
 
 namespace k2 {
 
@@ -181,6 +183,7 @@ int home_identification(
             (void*)&k2_n_chunks
         };
 
+        #if not USE_GLOBAL_BARRIER
         gpuErrchk(hipLaunchCooperativeKernel(
             (void*)identify_home,
             dim3(XCD_NUM), // one block per xcd
@@ -189,6 +192,16 @@ int home_identification(
             0,
             0
         ));
+        #else
+        gpuErrchk(hipLaunchKernel(
+            (void*)identify_home,
+            dim3(XCD_NUM), // one block per xcd
+            dim3(128), // 128 threads per block
+            kernel_args,
+            0,
+            0
+        ));
+        #endif
         gpuErrchk(hipDeviceSynchronize());
 
         /* retrieve and process results */

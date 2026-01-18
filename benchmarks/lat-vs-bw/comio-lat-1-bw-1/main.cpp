@@ -1,5 +1,4 @@
 #include <hip/hip_runtime.h>
-#include <hip/hip_cooperative_groups.h>
 #include <hip/hip_complex.h>
 
 #include <algorithm>
@@ -22,7 +21,6 @@
 #include "k2.h"
 
 using namespace std;
-namespace cg = cooperative_groups;
 
 typedef int64_t dtype;
 
@@ -30,11 +28,6 @@ typedef int64_t dtype;
 
 #define K1_PINNED_XCD 0
 #define K2_PINNED_XCD 0
-
-#define K2_BPX_MIN 1
-#define K2_BPX_MAX 160
-
-#define DEBUG_LEVEL 0
 
 //////////////////////////
 
@@ -48,6 +41,21 @@ typedef int64_t dtype;
 
 #ifndef K2_TPB
 #define K2_TPB 1024
+#endif
+
+#ifndef K2_BPX_MIN
+#define K2_BPX_MIN 1
+#endif
+#ifndef K2_BPX_MAX
+#define K2_BPX_MAX 160
+#endif
+
+#ifndef EPOCHS
+#define EPOCHS 21
+#endif
+
+#ifndef DEBUG_LEVEL
+#define DEBUG_LEVEL 0
 #endif
 
 //////////////////////////
@@ -273,7 +281,7 @@ int main(int argc, char **argv) {
         // gpuErrchk(hipStreamSetAttribute(k1_stream, hipStreamAttributePriority, &k1_stream_attr));
         // gpuErrchk(hipStreamSetAttribute(k2_stream, hipStreamAttributePriority, &k2_stream_attr));
 
-        for (int epoch = 0; epoch < 21; epoch++) {
+        for (int epoch = 0; epoch < EPOCHS; epoch++) {
             
             ////////////////////////// K1 RANDOMIZATION //////////////////////////
 
@@ -433,7 +441,12 @@ int main(int argc, char **argv) {
         double k1_dt95 = k1_times.getPercentile(0.95);
         double k1_dt99 = k1_times.getPercentile(0.99);
 
-        double bytes = k2_iters * k2_n_datas * 16 * K2_TPB * k2_bpx; // don't multiply by XCD_NUM! we're preluding only single XCD
+        // Calculate how many chunks are processed per TB per Iter (Logic from K2)
+        // Note: 16 is sizeof(float4)
+        double chunks_per_iter_per_tb = (double)K2_TPB / (k2_chunk_size / 16.0); 
+        // Total bytes = Iters * Datas * (Bytes per chunk) * (Chunks per iter per TB) * (Num TBs)
+        // Note: don't multiply by XCD_NUM! we're preluding only single XCD
+        double bytes = k2_iters * k2_n_datas * k2_chunk_size * chunks_per_iter_per_tb * k2_bpx;
         double bw_GBps = bytes / (k2_times.value() * 1e9);
         
         cout << setw(3) << k2_bpx << " " 

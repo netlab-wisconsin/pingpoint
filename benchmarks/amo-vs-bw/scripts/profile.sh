@@ -9,9 +9,10 @@ ROCPROF_COMPUTE=${ROCM_PATH}/bin/rocprof-compute
 
 # Encountered errors when LD_LIBRARY_PATH is not set:
 # - symbol lookup error: libamdhip64.so
-export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:${ROCM_PATH}/lib 
+export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:${ROCM_PATH}/lib
+# export PATH=${PATH}:${ROCM_PATH}/bin
 
-BASE_DIR=${HOME}/workspace/ici-workspace/ici/benchmarks/amo_vs_bw
+BASE_DIR=${HOME}/workspace/ici-workspace/ici/benchmarks/amo-vs-bw
 BIN_DIR=${BASE_DIR}/bin
 
 # set workload dir to current directory's workloads

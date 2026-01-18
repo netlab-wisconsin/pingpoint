@@ -13,7 +13,9 @@ namespace cg = cooperative_groups;
 #define DEBUG_K1_HOME 0
 #define DEBUG_K1_KERNEL 0
 
+#ifndef USE_GLOBAL_BARRIER
 #define USE_GLOBAL_BARRIER 0
+#endif
 
 namespace k1 {
 
@@ -143,10 +145,15 @@ int home_identification(
         (void *)&n_dtype_dbuf,
     };
 
+    #if not USE_GLOBAL_BARRIER
     gpuErrchk(hipLaunchCooperativeKernel(
         identify_home<dtype>, dim3(1 * XCD_NUM), dim3(128 / sizeof(dtype)),
         kernel_args, 0, 0));
-
+    #else
+    gpuErrchk(hipLaunchKernel(
+        (void*)identify_home<dtype>, dim3(XCD_NUM), dim3(128 / sizeof(dtype)),
+        kernel_args, 0, 0));
+    #endif
     gpuErrchk(hipDeviceSynchronize());
 
     vector<vector<uint32_t>> h_cycles(XCD_NUM, vector<uint32_t>(n_dtype_dbuf));

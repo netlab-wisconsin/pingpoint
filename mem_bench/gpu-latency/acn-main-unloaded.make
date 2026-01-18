@@ -6,7 +6,7 @@ OPTS 		:= --amdgpu-target=gfx942
 CC 			:= $(HIP_HOME)/bin/hipcc
 CCFLAGS 	:= 
 INCLUDES 	:= -I$(HIP_HOME)/include/rocprofiler/ -I$(HIP_HOME)/hsa/include/hsa
-LDFLAGS 	:= -L$(HIP_HOME)/rocprofiler/lib -lrocprofiler64 -lhsa-runtime64 -lrocm_smi64 -ldl
+LDFLAGS 	:= -L$(HIP_HOME)/lib/rocprofiler -lrocprofiler64 -lhsa-runtime64 -lrocm_smi64 -ldl
 
 PREFIX		:= acn
 NAME 		:= main

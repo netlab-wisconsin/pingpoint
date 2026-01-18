@@ -1,6 +1,6 @@
 #!/bin/bash
 
-BASE_DIR=${HOME}/workspace/ici-workspace/ici/benchmarks/amo_vs_bw
+BASE_DIR=${HOME}/workspace/ici-workspace/ici/benchmarks/amo-vs-bw
 BIN_DIR=${BASE_DIR}/bin
 
 TARGETS=(
