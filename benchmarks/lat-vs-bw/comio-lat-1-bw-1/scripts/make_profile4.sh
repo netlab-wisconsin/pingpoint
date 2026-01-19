@@ -1,7 +1,7 @@
 #!/bin/bash
 
 K2_BPX_PROF_START=1
-K2_BPX_PROF_END=160
+K2_BPX_PROF_END=100 # XCD full occupancy at ~80 BPX
 
 # 4 combinates of lat: (local,remote) x bw: (local,remote)
 COMBINATIONS=(

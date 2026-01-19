@@ -8,7 +8,7 @@ BIN_DIR="${BASE_DIR}/bin"
 RESULTS_DIR="/work1/sinclair/junyeol/ici-workspace/sigcomm-exp/comio-lat-1-vs-bw-1/raw"
 
 K2_BPX_MIN=1
-K2_BPX_MAX=160
+K2_BPX_MAX=100 # XCD full occupancy at ~80 BPX
 SUFFIX="run"
 
 # 4 combinates of lat: (local,remote) x bw: (local,remote)

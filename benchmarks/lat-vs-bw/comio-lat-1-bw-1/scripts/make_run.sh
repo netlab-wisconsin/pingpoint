@@ -1,7 +1,8 @@
 #!/bin/bash
 
 K2_BPX_MIN=1
-K2_BPX_MAX=160
+K2_BPX_MAX=100 # XCD full occupancy at ~80 BPX
+
 
 # 4 combinates of lat: (local,remote) x bw: (local,remote)
 COMBINATIONS=(
