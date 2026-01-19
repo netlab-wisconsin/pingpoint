@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set +e # continue on error
+
 source ${HOME}/miniconda3/etc/profile.d/conda.sh
 conda activate rocprofiler-compute
 
@@ -16,13 +18,16 @@ BIN_DIR=${BASE_DIR}/bin
 # set workload dir to current directory's workloads
 WORKLOAD_DIR=/work1/sinclair/junyeol/ici-workspace/sigcomm-exp/comio-lat-1-vs-bw-1/workloads
 
-K1_PINNED_HBM=2 
+K1_PINNED_HBM=2
 K2_PINNED_HBM=1
 
-set +e # continue on error
+K2_BPX_PROF_START=1
+K2_BPX_PROF_END=160
 
-for i in $(seq 1 160); do
-  TARGET="lat_${K1_PINNED_HBM}_bw_${K2_PINNED_HBM}_bpxmin_${i}_bpxmax_${i}_prof"
+SUFFIX="prof"
+
+for i in $(seq "$K2_BPX_PROF_START" "$K2_BPX_PROF_END"); do
+  TARGET="lat_${K1_PINNED_HBM}_bw_${K2_PINNED_HBM}_bpx_${i}_${i}_${SUFFIX}"
   OUTPUT_DIR=${WORKLOAD_DIR}/${TARGET}/MI300X_A1
   mkdir -p ${OUTPUT_DIR}
   echo "Profiling and analyzing ${TARGET}..."

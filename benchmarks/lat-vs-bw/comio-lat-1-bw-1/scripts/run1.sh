@@ -14,9 +14,9 @@ SUFFIX="run"
 # 4 combinates of lat: (local,remote) x bw: (local,remote)
 COMBINATIONS=(
     "0 1"  # Local Lat, Local BW
-    "0 3"  # Local Lat, Remote BW
-    "2 1"  # Remote Lat, Local BW
-    "2 7"  # Remote Lat, Remote BW
+    # "0 3"  # Local Lat, Remote BW
+    # "2 1"  # Remote Lat, Local BW
+    # "2 7"  # Remote Lat, Remote BW
 )
 
 for combo in "${COMBINATIONS[@]}"; do
@@ -24,6 +24,6 @@ for combo in "${COMBINATIONS[@]}"; do
     K1_PINNED_HBM=$(echo $combo | cut -d' ' -f1)
     K2_PINNED_HBM=$(echo $combo | cut -d' ' -f2)
 
-    TARGET="lat_${lat_hbm}_bw_${bw_hbm}_bpx_${K2_BPX_MIN}_${K2_BPX_MAX}_${SUFFIX}"
+    TARGET="lat_${K1_PINNED_HBM}_bw_${K2_PINNED_HBM}_bpx_${K2_BPX_MIN}_${K2_BPX_MAX}_${SUFFIX}"
     ${BIN_DIR}/${TARGET} |& tee ${RESULTS_DIR}/${TARGET}.out
 done

@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set +e # continue on error
+
 source ${HOME}/miniconda3/etc/profile.d/conda.sh
 conda activate rocprofiler-compute
 
@@ -19,13 +21,15 @@ WORKLOAD_DIR=/work1/sinclair/junyeol/ici-workspace/sigcomm-exp/comio-lat-1-vs-bw
 K1_PINNED_HBM=2
 K2_PINNED_HBM=7
 
-set +e # continue on error
+K2_BPX_PROF_START=1
+K2_BPX_PROF_END=160
 
-for i in $(seq 1 160); do
-  TARGET="lat_${K1_PINNED_HBM}_bw_${K2_PINNED_HBM}_bpxmin_${i}_bpxmax_${i}_prof"
+SUFFIX="prof"
+
+for i in $(seq "$K2_BPX_PROF_START" "$K2_BPX_PROF_END"); do
+  TARGET="lat_${K1_PINNED_HBM}_bw_${K2_PINNED_HBM}_bpx_${i}_${i}_${SUFFIX}"
   OUTPUT_DIR=${WORKLOAD_DIR}/${TARGET}/MI300X_A1
   mkdir -p ${OUTPUT_DIR}
   echo "Profiling and analyzing ${TARGET}..."
   ${ROCPROF_COMPUTE} profile -n ${TARGET} --path ${OUTPUT_DIR} --no-roof --quiet -- ${BIN_DIR}/${TARGET}
-  ${ROCPROF_COMPUTE} analyze --path ${OUTPUT_DIR} --quiet > ${OUTPUT_DIR}/analyze.out # Use `--kernel $idx` to profile specific kernel listed at --list-stats 
 done

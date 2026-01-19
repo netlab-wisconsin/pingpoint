@@ -155,12 +155,11 @@ __global__ void k(
                     : [IN_A1]"v" (&ptr_in1[tid]), [IN_B1]"v" (&ptr_in2[tid]), [IN_C1]"v" (&ptr_in3[tid]), [IN_D1]"v" (&ptr_in4[tid])
                     : "memory"
                 );
+                sink0 += reg_in1.x + reg_in2.x + reg_in3.x + reg_in4.x;
+                sink1 += reg_in1.y + reg_in2.y + reg_in3.y + reg_in4.y;
+                sink2 += reg_in1.z + reg_in2.z + reg_in3.z + reg_in4.z;
+                sink3 += reg_in1.w + reg_in2.w + reg_in3.w + reg_in4.w;
             }
-
-            sink0 += reg_in1.x + reg_in2.x + reg_in3.x + reg_in4.x;
-            sink1 += reg_in1.y + reg_in2.y + reg_in3.y + reg_in4.y;
-            sink2 += reg_in1.z + reg_in2.z + reg_in3.z + reg_in4.z;
-            sink3 += reg_in1.w + reg_in2.w + reg_in3.w + reg_in4.w;
         }
 
         // stop timing

@@ -276,31 +276,43 @@ __global__ void k(
     float4 reg_in1, reg_in2, reg_in3, reg_in4;
     float sink0 = 0, sink1 = 0, sink2 = 0, sink3 = 0;
 
+    // E.g., if tpb = 1024 and chunk_size = 2048, n_chunks_per_iter_per_tb = 8
     const size_t n_chunks_per_iter_per_tb = (blockDim.x / (k2_chunk_size / 16));
     size_t n_iter = k2_chunks_size[k2_hbm] / (n_tbs_in_xcd * n_chunks_per_iter_per_tb);
 
-    // for (size_t iter = 0; iter < n_iter; iter++) { /* initial logic w/o k2_N */
+#if 0
+    // --- Previous Logic (Iterate strictly by n_iter) ---
+    for (size_t iter = 0; iter < n_iter; iter++) {
+#else
+    // --- New Logic (Iterate by k2_N, similar to k1's iter) ---
     for (int64_t i = 0; i < k2_N; i++) {
-        size_t iter = i % n_iter; // Wrap around using modulo if i exceeds available n_iter
-        for (size_t c = 0; c < n_chunks_per_iter_per_tb; c++) {
-            size_t chunk_idx = c+ tbid_in_xcd * n_chunks_per_iter_per_tb + iter * n_tbs_in_xcd;
+        size_t iter = i % n_iter;
+#endif
+        // E.g., if n_chunks_per_iter_per_tb = 8 and i = 0, 
+        // tbid_in_xcd = 0 processes chunks 0..7, 
+        // tbid_in_xcd = 1 processes chunks 8..15, ... etc.
+        size_t chunk_idx = iter * n_chunks_per_iter_per_tb * n_tbs_in_xcd \
+                            + (tbid_in_xcd * n_chunks_per_iter_per_tb) \
+                            + (tid / (k2_chunk_size / 16));
+        // E.g., if chunk_size = 2048, each 128 threads in the tb will handle 1 chunk
+        // and each thread in 128 threads of the chunk will handle different 16B offsets
+        size_t thread_offset_in_chunk = tid % (k2_chunk_size / 16);
 
-            float4 *ptr_in1 = reinterpret_cast<float4*>(k2_chunks1[k2_offset1[k2_hbm] + chunk_idx]);
-            float4 *ptr_in2 = reinterpret_cast<float4*>(k2_chunks2[k2_offset2[k2_hbm] + chunk_idx]);
-            float4 *ptr_in3 = reinterpret_cast<float4*>(k2_chunks3[k2_offset3[k2_hbm] + chunk_idx]);
-            float4 *ptr_in4 = reinterpret_cast<float4*>(k2_chunks4[k2_offset4[k2_hbm] + chunk_idx]);
-            
-            asm volatile(
-                "flat_load_dwordx4 %[OUT_D1],  %[IN_D1]\n\t"
-                "flat_load_dwordx4 %[OUT_C1],  %[IN_C1]\n\t"
-                "flat_load_dwordx4 %[OUT_B1],  %[IN_B1]\n\t"
-                "flat_load_dwordx4 %[OUT_A1],  %[IN_A1]\n\t" 
-                "s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t" // necessary?
-                : [OUT_A1]"=v" (reg_in1), [OUT_B1]"=v" (reg_in2), [OUT_C1]"=v"(reg_in3), [OUT_D1]"=v" (reg_in4)
-                : [IN_A1]"v" (&ptr_in1[tid]), [IN_B1]"v" (&ptr_in2[tid]), [IN_C1]"v" (&ptr_in3[tid]), [IN_D1]"v" (&ptr_in4[tid])
-                : "memory"
-            );
-        }
+        float4 *ptr_in1 = reinterpret_cast<float4*>(k2_chunks1[k2_offset1[k2_hbm] + chunk_idx]);
+        float4 *ptr_in2 = reinterpret_cast<float4*>(k2_chunks2[k2_offset2[k2_hbm] + chunk_idx]);
+        float4 *ptr_in3 = reinterpret_cast<float4*>(k2_chunks3[k2_offset3[k2_hbm] + chunk_idx]);
+        float4 *ptr_in4 = reinterpret_cast<float4*>(k2_chunks4[k2_offset4[k2_hbm] + chunk_idx]);
+
+        asm volatile(
+            "flat_load_dwordx4 %[OUT_D1],  %[IN_D1]\n\t"
+            "flat_load_dwordx4 %[OUT_C1],  %[IN_C1]\n\t"
+            "flat_load_dwordx4 %[OUT_B1],  %[IN_B1]\n\t"
+            "flat_load_dwordx4 %[OUT_A1],  %[IN_A1]\n\t" 
+            "s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t"
+            : [OUT_A1]"=v" (reg_in1), [OUT_B1]"=v" (reg_in2), [OUT_C1]"=v"(reg_in3), [OUT_D1]"=v" (reg_in4)
+            : [IN_A1]"v" (&ptr_in1[thread_offset_in_chunk]), [IN_B1]"v" (&ptr_in2[thread_offset_in_chunk]), [IN_C1]"v" (&ptr_in3[thread_offset_in_chunk]), [IN_D1]"v" (&ptr_in4[thread_offset_in_chunk]) // note (01/18) not tid!
+            : "memory"
+        );
 
         sink0 += reg_in1.x + reg_in2.x + reg_in3.x + reg_in4.x;
         sink1 += reg_in1.y + reg_in2.y + reg_in3.y + reg_in4.y;
