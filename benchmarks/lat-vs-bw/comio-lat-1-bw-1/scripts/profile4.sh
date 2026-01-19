@@ -32,4 +32,5 @@ for i in $(seq "$K2_BPX_PROF_START" "$K2_BPX_PROF_END"); do
   mkdir -p ${OUTPUT_DIR}
   echo "Profiling and analyzing ${TARGET}..."
   ${ROCPROF_COMPUTE} profile -n ${TARGET} --path ${OUTPUT_DIR} --no-roof --quiet -- ${BIN_DIR}/${TARGET}
+  ${ROCPROF_COMPUTE} analyze --path ${OUTPUT_DIR} --quiet > ${OUTPUT_DIR}/analyze.out # Use `--kernel $idx` to profile specific kernel listed at --list-stats 
 done
