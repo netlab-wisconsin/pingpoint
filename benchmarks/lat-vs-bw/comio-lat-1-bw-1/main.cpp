@@ -21,7 +21,7 @@
 #include "k2.h"
 
 using namespace std;
-
+ 
 typedef int64_t dtype;
 
 //////////////////////////
@@ -30,15 +30,19 @@ typedef int64_t dtype;
 #if 0
 #define K2_PINNED_XCD 0
 #else
+#ifndef K2_PINNED_XCD_1
 #define K2_PINNED_XCD_1 0
+#endif
+#ifndef K2_PINNED_XCD_2
 #define K2_PINNED_XCD_2 1
+#endif
 #endif
 //////////////////////////
 
 #ifndef K1_PINNED_HBM
 #define K1_PINNED_HBM 0
 #endif
-
+  
 #if 0
 #ifndef K2_PINNED_HBM
 #define K2_PINNED_HBM 1
@@ -98,8 +102,9 @@ int main(int argc, char **argv)
 #endif
 #else
 #if DEBUG_LEVEL >= 0
-    cout << "K1_PINNED_XCD: " << K1_PINNED_XCD << " "
-         << "K1_PINNED_HBM: " << K1_PINNED_HBM << " "
+    cout \
+        //  << "K1_PINNED_XCD: " << K1_PINNED_XCD << " "
+        //  << "K1_PINNED_HBM: " << K1_PINNED_HBM << " "
          << "K2_PINNED_XCD_1: " << K2_PINNED_XCD_1 << " "
          << "K2_PINNED_XCD_2: " << K2_PINNED_XCD_2 << " "
          << "K2_PINNED_HBM_1: " << K2_PINNED_HBM_1 << " "
@@ -275,10 +280,19 @@ int main(int argc, char **argv)
     gpuErrchk(hipMemcpy(k2_d_xcd_chunks_size, k2_xcd_chunks_size.data(), sizeof(size_t) * XCD_NUM, hipMemcpyHostToDevice));
 
     // safety check
+#if 0 // 여기
     size_t k2_total_pinned_chunks = accumulate(k2_h_xcd_chunks_size.begin(), k2_h_xcd_chunks_size.end(), 0UL,
                                                [](size_t sum, const auto &row)
                                                { return sum + row[K2_PINNED_HBM]; });
-
+#else
+    size_t k2_total_pinned_chunks_1 = accumulate(k2_h_xcd_chunks_size.begin(), k2_h_xcd_chunks_size.end(), 0UL,
+                                               [](size_t sum, const auto &row)
+                                               { return sum + row[K2_PINNED_HBM_1]; });
+    size_t k2_total_pinned_chunks_2 = accumulate(k2_h_xcd_chunks_size.begin(), k2_h_xcd_chunks_size.end(), 0UL,
+                                               [](size_t sum, const auto &row)
+                                               { return sum + row[K2_PINNED_HBM_2]; });
+    size_t k2_total_pinned_chunks = min(k2_total_pinned_chunks_1, k2_total_pinned_chunks_2);
+#endif
     assert(k2_total_pinned_chunks * k2_chunk_size >= (4 * 1024 * 1024)); // >= 4MB l2 size
     assert ( k2_total_pinned_chunks * k2_chunk_size  <= (64 * 1024 * 1024) ); // <= 64MB llc size
 
