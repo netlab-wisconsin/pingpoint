@@ -27,17 +27,31 @@ typedef int64_t dtype;
 //////////////////////////
 
 #define K1_PINNED_XCD 0
+#if 0
 #define K2_PINNED_XCD 0
-
+#else
+#define K2_PINNED_XCD_1 0
+#define K2_PINNED_XCD_2 1
+#endif
 //////////////////////////
 
 #ifndef K1_PINNED_HBM
 #define K1_PINNED_HBM 0
 #endif
 
+#if 0
 #ifndef K2_PINNED_HBM
 #define K2_PINNED_HBM 1
 #endif
+#else
+#ifndef K2_PINNED_HBM_1
+#define K2_PINNED_HBM_1 2
+#endif
+#ifndef K2_PINNED_HBM_2
+#define K2_PINNED_HBM_2 5
+#endif
+#endif
+
 
 #ifndef K2_TPB
 #define K2_TPB 1024
@@ -47,7 +61,7 @@ typedef int64_t dtype;
 #define K2_BPX_MIN 1
 #endif
 #ifndef K2_BPX_MAX
-#define K2_BPX_MAX 160
+#define K2_BPX_MAX 80
 #endif
 
 #ifndef EPOCHS
@@ -69,6 +83,7 @@ int main(int argc, char **argv)
     printf("Running in RUN mode\n");
 #endif
 
+#if 0
 #if DEBUG_LEVEL >= 0
     cout << "K1_PINNED_XCD: " << K1_PINNED_XCD << " "
          << "K1_PINNED_HBM: " << K1_PINNED_HBM << " "
@@ -81,7 +96,22 @@ int main(int argc, char **argv)
          << "\n"
          << flush;
 #endif
+#else
+#if DEBUG_LEVEL >= 0
+    cout << "K1_PINNED_XCD: " << K1_PINNED_XCD << " "
+         << "K1_PINNED_HBM: " << K1_PINNED_HBM << " "
+         << "K2_PINNED_XCD_1: " << K2_PINNED_XCD_1 << " "
+         << "K2_PINNED_XCD_2: " << K2_PINNED_XCD_2 << " "
+         << "K2_PINNED_HBM_1: " << K2_PINNED_HBM_1 << " "
+         << "K2_PINNED_HBM_2: " << K2_PINNED_HBM_2 << " "
+         << "\n"
+         << flush;
 
+    cout << "K2_TPB: " << K2_TPB << " "
+         << "\n"
+         << flush;
+#endif
+#endif
     std::random_device rd;
     std::mt19937 g(rd());
 
@@ -427,11 +457,12 @@ int main(int argc, char **argv)
 
             ////////////////////////// KERNEL LAUNCH //////////////////////////
 
+#if 0
             // K1 warmup
             k1::k<dtype><<<dim3(XCD_NUM), dim3(1), 0, k1_stream>>>(dbuf_start, dummy_buf, k1_iters, K1_PINNED_XCD, 3, 0); // SE3 CU0
             k1::k<dtype><<<dim3(XCD_NUM), dim3(1), 0, k1_stream>>>(dbuf_start, dummy_buf, k1_iters, K1_PINNED_XCD, 3, 0); // SE3 CU0
             gpuErrchk(hipDeviceSynchronize());
-
+#endif 
             // Events
             hipEvent_t k1_start, k1_stop;
             hipEvent_t k2_start, k2_stop;
@@ -440,6 +471,7 @@ int main(int argc, char **argv)
             gpuErrchk(hipEventCreate(&k2_start));
             gpuErrchk(hipEventCreate(&k2_stop));
 
+#if 0
             // K2 launch
             gpuErrchk(hipEventRecord(k2_start, k2_stream));
             k2::k<<<dim3(k2_n_blocks), dim3(k2_n_threads_per_block), 0, k2_stream>>>(
@@ -456,13 +488,31 @@ int main(int argc, char **argv)
             // Wait stream
             gpuErrchk(hipStreamSynchronize(k1_stream));
             gpuErrchk(hipStreamSynchronize(k2_stream));
+#endif
+
+#if 1
+            // K2 launch
+            gpuErrchk(hipEventRecord(k2_start, 0));
+            k2::k<<<dim3(k2_n_blocks), dim3(k2_n_threads_per_block), 0, 0>>>(
+                k2_d_xcd_chunks[0], k2_d_xcd_chunks[1], k2_d_xcd_chunks[2], k2_d_xcd_chunks[3],
+                k2_d_xcd_chunks_offset[0], k2_d_xcd_chunks_offset[1], k2_d_xcd_chunks_offset[2], k2_d_xcd_chunks_offset[3],
+                k2_dummy_sink, k2_d_xcd_chunks_size, k2_chunk_size, k2_iters, 
+                K2_PINNED_XCD_1, K2_PINNED_XCD_2, K2_PINNED_HBM_1, K2_PINNED_HBM_2);
+            gpuErrchk(hipEventRecord(k2_stop, 0));
+
+            // Wait stream
+            gpuErrchk(hipDeviceSynchronize());
+#endif
+
 
             ////////////////////////// METRICS COLLECTION //////////////////////////
 
             float k1_msec = 0.0f, k2_msec = 0.0f;
+#if 0
             gpuErrchk(hipEventElapsedTime(&k1_msec, k1_start, k1_stop));
-            gpuErrchk(hipEventElapsedTime(&k2_msec, k2_start, k2_stop));
             k1_times.add(k1_msec / 1000.0); // seconds
+#endif
+            gpuErrchk(hipEventElapsedTime(&k2_msec, k2_start, k2_stop));
             k2_times.add(k2_msec / 1000.0); // seconds
 
             ////////////////////////// CLEANUP //////////////////////////
@@ -492,8 +542,13 @@ int main(int argc, char **argv)
         // Note: 16 is sizeof(float4)
         double chunks_per_iter_per_tb = (double)K2_TPB / (k2_chunk_size / 16.0);
         // Total bytes = Iters * Datas * (Bytes per chunk) * (Chunks per iter per TB) * (Num TBs)
+#if 0
         // Note: don't multiply by XCD_NUM! we're preluding only single XCD
         double bytes = k2_iters * k2_n_datas * k2_chunk_size * chunks_per_iter_per_tb * k2_bpx;
+#else
+        // Two XCDs utilized
+        double bytes = k2_iters * k2_n_datas * k2_chunk_size * chunks_per_iter_per_tb * k2_bpx * 2;
+#endif
         double bw_GBps = bytes / (k2_times.value() * 1e9);
 
         cout << setw(3) << k2_bpx << " "
