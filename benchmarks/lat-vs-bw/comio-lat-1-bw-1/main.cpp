@@ -28,7 +28,9 @@ typedef int64_t dtype;
 
 #define K1_PINNED_XCD 0
 #if 1 // 이거!
+#ifndef K2_PINNED_XCD
 #define K2_PINNED_XCD 1
+#endif
 #else
 #define K2_PINNED_XCD_1 0
 #define K2_PINNED_XCD_2 1
@@ -85,8 +87,9 @@ int main(int argc, char **argv)
 
 #if 1 // 이거!
 #if DEBUG_LEVEL >= 0
-    cout << "K1_PINNED_XCD: " << K1_PINNED_XCD << " "
-         << "K1_PINNED_HBM: " << K1_PINNED_HBM << " "
+    cout \
+        //  << "K1_PINNED_XCD: " << K1_PINNED_XCD << " "
+        //  << "K1_PINNED_HBM: " << K1_PINNED_HBM << " "
          << "K2_PINNED_XCD: " << K2_PINNED_XCD << " "
          << "K2_PINNED_HBM: " << K2_PINNED_HBM << " "
          << "\n"
@@ -462,7 +465,7 @@ int main(int argc, char **argv)
             gpuErrchk(hipMallocManaged(&k2_dummy_sink, sizeof(float) * k2_total_threads));
 
             ////////////////////////// KERNEL LAUNCH //////////////////////////
-#if 1 // 이거!
+#if 0 // 이거!
             // K1 warmup
             k1::k<dtype><<<dim3(XCD_NUM), dim3(1), 0, k1_stream>>>(dbuf_start, dummy_buf, k1_iters, K1_PINNED_XCD, 3, 0); // SE3 CU0
             k1::k<dtype><<<dim3(XCD_NUM), dim3(1), 0, k1_stream>>>(dbuf_start, dummy_buf, k1_iters, K1_PINNED_XCD, 3, 0); // SE3 CU0
@@ -511,7 +514,7 @@ int main(int argc, char **argv)
             ////////////////////////// METRICS COLLECTION //////////////////////////
 
             float k1_msec = 0.0f, k2_msec = 0.0f;
-#if 1  // 이거!
+#if 0  // 이거!
             gpuErrchk(hipEventElapsedTime(&k1_msec, k1_start, k1_stop));
             k1_times.add(k1_msec / 1000.0); // seconds
 #endif
