@@ -246,8 +246,13 @@ int home_identification(
 __global__ void k(
     uint64_t *k2_chunks1, uint64_t *k2_chunks2, uint64_t *k2_chunks3, uint64_t *k2_chunks4,
     size_t *k2_offset1, size_t *k2_offset2, size_t *k2_offset3, size_t *k2_offset4,
-    float *k2_sink, size_t *k2_chunks_size, const size_t k2_chunk_size, const int64_t k2_N, 
-    const uint32_t k2_xcd1, const uint32_t k2_xcd2, const uint32_t k2_hbm1, const uint32_t k2_hbm2)
+    float *k2_sink, size_t *k2_chunks_size, const size_t k2_chunk_size, const int64_t k2_N,
+#if 1 // 이거!
+    const uint32_t k2_xcd, const uint32_t k2_hbm
+#else
+    const uint32_t k2_xcd1, const uint32_t k2_xcd2, const uint32_t k2_hbm1, const uint32_t k2_hbm2
+#endif
+    )
 {
 
     int bid = blockIdx.x;
@@ -264,8 +269,11 @@ __global__ void k(
     asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=r"(xcc_id));
 
     // prelude: for k2, only the threads in xcd 1 run
+#if 1
+    if (xcc_id != k2_xcd) return;
+#else
     if (xcc_id != k2_xcd1 && xcc_id != k2_xcd2) return;
-    // if (xcc_id != k2_xcd1) return;
+#endif
 
     #if DEBUG_K2_KERNEL
     if (tid == 0) {
@@ -276,8 +284,9 @@ __global__ void k(
     #endif
 
     // set k2_hbm
+#if 0 // 이거!
     const uint32_t k2_hbm = (xcc_id == k2_xcd1) ? k2_hbm1 : k2_hbm2;
-
+#endif
     float4 reg_in1, reg_in2, reg_in3, reg_in4;
     float sink0 = 0, sink1 = 0, sink2 = 0, sink3 = 0;
 

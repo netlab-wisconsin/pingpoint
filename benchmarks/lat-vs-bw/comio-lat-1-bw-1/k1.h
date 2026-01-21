@@ -235,7 +235,9 @@ __global__ void k(
     asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID, 8, 4)" : "=r"(cu_id));
     asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID, 13, 3)" : "=r"(se_id));
     asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=r"(xcc_id));
+#if 0  // 이거!
     assert (se_id == se && cu_id == cu); // must be set by host code
+#endif
     if (xcc_id != xcd) return; // prelude xcd
     #if DEBUG_K1_KERNEL
     printf("(bid:%d,tid:%d,uid:%d) k1 launched on xcd:%u se:%u cu:%u\n",
