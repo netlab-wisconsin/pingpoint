@@ -65,11 +65,13 @@ __global__ void identify_home(T *data, uint32_t *cycles, const long long n_dtype
     asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID, 8, 4)" : "=r"(cu_id));
     asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID, 13, 3)" : "=r"(se_id));
     asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=r"(xcc_id));
+
+#if DEBUG_K1_HOME
     if (tid == 0) {
-        #if DEBUG
         printf("bid %d: (xcc_id: %u, se_id: %u, cu_id: %u)\n", bid, xcc_id, se_id, cu_id);
-        #endif
+
     }
+#endif
 
     const size_t n_iter = n_dtypes / blockDim.x;
     const size_t inner_size = min(n_dtypes * sizeof(T), 64 * 1024 * 1024); // 64MB per inner loop (given TLB lat jump at 64MB)
@@ -78,6 +80,12 @@ __global__ void identify_home(T *data, uint32_t *cycles, const long long n_dtype
     const size_t n_inner = inner_size / (sizeof(int64_t) * blockDim.x); // num of accesses per tb in inner loop
     // printf("n_outer: %zu, n_inner: %zu, n_iter: %zu\n", n_outer, n_inner, n_iter);
     assert (n_iter <= n_outer * n_inner);
+
+#if DEBUG_K1_HOME
+    if (tid == 0) {
+        printf("bid %d: n_outer: %zu, n_inner: %zu, n_iter: %zu\n", bid, n_outer, n_inner, n_iter);
+    }
+#endif
     
     for (size_t i = 0; i < n_outer; i++) {
         // warmup 
@@ -145,6 +153,13 @@ int home_identification(
         (void *)&n_dtype_dbuf,
     };
 
+    #if DEBUG_K1_HOME
+    cout << "K1 home identification kernel launch parameters:\n"
+         << "  n_dtype_dbuf: " << n_dtype_dbuf
+         << "  n_cl_dbuf: " << n_cl_dbuf 
+         << "\n" << flush;
+    #endif
+
     #if not USE_GLOBAL_BARRIER
     gpuErrchk(hipLaunchCooperativeKernel(
         identify_home<dtype>, dim3(1 * XCD_NUM), dim3(128 / sizeof(dtype)),
@@ -203,7 +218,13 @@ int home_identification(
     // boundary check
     // single-CC LLC range is 1MB - 16MB
     for (int x = 0; x < XCD_NUM; x++) {
-
+#if 1
+        if (xcd_cls[x].size() * cl_bytes < (64 * 1024 * 1024)) {
+            cout << "K1 pinned HBM" << "[" << x << "]" << " chunks size " << xcd_cls[x].size() * cl_bytes / (1024 * 1024) << " MB" //
+                << " is smaller than 64 MB" << "\n" << flush;
+            return -1;
+        }
+#else
         if (xcd_cls[x].size() * cl_bytes < (1 * 1024 * 1024)) {
             cout << "K1 pinned HBM" << "[" << x << "]" << " chunks size " << xcd_cls[x].size() * cl_bytes / (1024 * 1024) << " MB" //
                 << " is smaller than 1 MB" << "\n" << flush;
@@ -215,7 +236,7 @@ int home_identification(
                 << " is larger than 16 MB" << "\n" << flush;
             return -1;
         }
-
+#endif
     }
 
     return 0;

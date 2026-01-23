@@ -140,11 +140,11 @@ int main(int argc, char **argv)
     // But don't further reduce LEN. 1<<15 is almost minimal for bypassing L2.
     const size_t LEN = (1 << 15);
     const size_t multiplicative_factor = XCD_NUM * 2;
-#elif 1
-    const unsigned long long LEN = (1ULL << 34); // 16GB
+#elif 0
+    const size_t LEN = (1 << 24); // 16GB
     const size_t multiplicative_factor = XCD_NUM ;
 #else
-    const size_t LEN = (1 << 16);
+    const size_t LEN = (1 << 21);
     const size_t multiplicative_factor = XCD_NUM * 1;
 #endif
     const size_t cl_size = cl_bytes / sizeof(dtype);
@@ -498,7 +498,7 @@ int main(int argc, char **argv)
             gpuErrchk(hipMallocManaged(&k2_dummy_sink, sizeof(float) * k2_total_threads));
 
             ////////////////////////// KERNEL LAUNCH //////////////////////////
-#if 1 // 이거!
+#if 0 // 이거! 웜업 무조건 꺼야함 HBM 실험시엔.
             // K1 warmup
             k1::k<dtype><<<dim3(XCD_NUM), dim3(1), 0, k1_stream>>>(dbuf_start, dummy_buf, k1_iters, K1_PINNED_XCD, 3, 0); // SE3 CU0
             k1::k<dtype><<<dim3(XCD_NUM), dim3(1), 0, k1_stream>>>(dbuf_start, dummy_buf, k1_iters, K1_PINNED_XCD, 3, 0); // SE3 CU0

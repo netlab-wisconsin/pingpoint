@@ -20,9 +20,9 @@ K2_BPX_MAX := 80
 
 SUFFIX := hbmrange
 
-all: $(BIN_DIR)/lat_xcd_$(K1_PINNED_XCD)_hbm_$(K1_PINNED_HBM)_bw_xcd_$(K2_PINNED_XCD)_hbm_$(K2_PINNED_HBM)_bpx_$(K2_BPX_MIN)_$(K2_BPX_MAX)_$(SUFFIX)
+all: $(BIN_DIR)/lat_xcd_$(K1_PINNED_XCD)_hbm_$(K1_PINNED_HBM)_bw_xcd_$(K2_PINNED_XCD)_hbm_$(K2_PINNED_HBM)_bpx_$(K2_BPX_MIN)_$(K2_BPX_MAX)_tpb_$(K2_TPB)_$(SUFFIX)
 
-$(BIN_DIR)/lat_xcd_$(K1_PINNED_XCD)_hbm_$(K1_PINNED_HBM)_bw_xcd_$(K2_PINNED_XCD)_hbm_$(K2_PINNED_HBM)_bpx_$(K2_BPX_MIN)_$(K2_BPX_MAX)_$(SUFFIX): main.cpp main.h k1.h k2.h  
+$(BIN_DIR)/lat_xcd_$(K1_PINNED_XCD)_hbm_$(K1_PINNED_HBM)_bw_xcd_$(K2_PINNED_XCD)_hbm_$(K2_PINNED_HBM)_bpx_$(K2_BPX_MIN)_$(K2_BPX_MAX)_tpb_$(K2_TPB)_$(SUFFIX): main.cpp main.h k1.h k2.h  
 	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) \
 	-DK1_PINNED_XCD=$(K1_PINNED_XCD) -DK2_PINNED_XCD=$(K2_PINNED_XCD) \
 	-DK1_PINNED_HBM=$(K1_PINNED_HBM) -DK2_PINNED_HBM=$(K2_PINNED_HBM) \
@@ -31,6 +31,6 @@ $(BIN_DIR)/lat_xcd_$(K1_PINNED_XCD)_hbm_$(K1_PINNED_HBM)_bw_xcd_$(K2_PINNED_XCD)
 	-o $@ $<
 
 clean: 
-	rm -f $(BIN_DIR)/lat_xcd_*_hbm_*_bw_xcd_*_hbm_*_bpx_*_*.run
+	rm -f $(BIN_DIR)/lat_xcd_*_hbm_*_bw_xcd_*_hbm_*_bpx_*_*_tpb_*_*.run
 
 # srun -N 1 -p mi3001x --exclude k002-004-v1 -t 4:00:00 ./bin/lat_xcd_0_hbm_0_bw_xcd_1_hbm_1 |& tee /work1/sinclair/junyeol/ici-workspace/sigcomm-exp/3.6-lat-vs-bw/raw/lat_xcd_0_hbm_0_bw_xcd_1_hbm_1.out
