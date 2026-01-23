@@ -26,32 +26,45 @@ typedef int64_t dtype;
 
 //////////////////////////
 
+#ifndef K1_PINNED_XCD
 #define K1_PINNED_XCD 0
-#if 1 // 이거!
+#endif
+
+#if 1 // <--
+
+#ifndef K2_PINNED_XCD
 #define K2_PINNED_XCD 1
+#endif
+
 #else
+
 #define K2_PINNED_XCD_1 0
 #define K2_PINNED_XCD_2 1
-#endif
+
+#endif // -->
+
 //////////////////////////
 
 #ifndef K1_PINNED_HBM
-#define K1_PINNED_HBM 6
+#define K1_PINNED_HBM 0
 #endif
 
-#if 1 // 이거!
+#if 1 // <--
+
 #ifndef K2_PINNED_HBM
-#define K2_PINNED_HBM 5
+#define K2_PINNED_HBM 1
 #endif
+
 #else
+
 #ifndef K2_PINNED_HBM_1
 #define K2_PINNED_HBM_1 2
 #endif
 #ifndef K2_PINNED_HBM_2
 #define K2_PINNED_HBM_2 5
 #endif
-#endif
 
+#endif // -->
 
 #ifndef K2_TPB
 #define K2_TPB 1024
@@ -127,6 +140,9 @@ int main(int argc, char **argv)
     // But don't further reduce LEN. 1<<15 is almost minimal for bypassing L2.
     const size_t LEN = (1 << 15);
     const size_t multiplicative_factor = XCD_NUM * 2;
+#elif 1
+    const unsigned long long LEN = (1ULL << 34); // 16GB
+    const size_t multiplicative_factor = XCD_NUM ;
 #else
     const size_t LEN = (1 << 16);
     const size_t multiplicative_factor = XCD_NUM * 1;
@@ -159,9 +175,14 @@ int main(int argc, char **argv)
             xcd_cls) == -1)
         return -1;
 
+#if 1
+    assert(xcd_dtypes[K1_PINNED_HBM].size() * sizeof(dtype) >= (64 * 1024 * 1024)); // >= 64MB llc size
+
+#else
     // safety check
     assert(xcd_dtypes[K1_PINNED_HBM].size() * sizeof(dtype) >= (4 * 1024 * 1024));  // >= 4MB l2 size
     assert(xcd_dtypes[K1_PINNED_HBM].size() * sizeof(dtype) <= (64 * 1024 * 1024)); // <= 64MB llc size
+#endif
 
 #if DEBUG_LEVEL >= 0
     cout << "K1 pinned data: "
@@ -174,7 +195,7 @@ int main(int argc, char **argv)
 
     const int k2_n_datas = 4;
 
-#if 0
+#if 1
     // Don't use too large k2 data. It will evict k1 data from LLC to HBM.
     const long long k2_n_pages = (128 << 6); // 16GB per input data
 #else
@@ -258,10 +279,17 @@ int main(int argc, char **argv)
             k2_xcd_chunks_size[x] = min(k2_xcd_chunks_size[x], k2_h_xcd_chunks_size[i][x]);
         }
     }
+
+#if 1
+    // LLC로 가자
+    const int min_n_chunks_per_xcd = ((64 * 1024 * 1024) / (k2_chunk_size)); // minimal #chunks >= 64MB
+#else
     // ensure minimal 8MB = 2 * l2_size per-xcd chunks in order to thrash l2
     // conservative. since 2 xcds on same iod actually share the home data, another approach can be
     // ensure minimal 8MB per-iod chunks
     const int min_n_chunks_per_xcd = ((4 * 2 * 1024 * 1024) / (k2_chunk_size)); // minimal #chunks >= 8MB
+#endif
+
     for (int x = 0; x < XCD_NUM; x++)
     {
 #if DEBUG_LEVEL >= 1
@@ -279,8 +307,12 @@ int main(int argc, char **argv)
                                                [](size_t sum, const auto &row)
                                                { return sum + row[K2_PINNED_HBM]; });
 
+#if 1
     assert(k2_total_pinned_chunks * k2_chunk_size >= (4 * 1024 * 1024)); // >= 4MB l2 size
-    assert ( k2_total_pinned_chunks * k2_chunk_size  <= (64 * 1024 * 1024) ); // <= 64MB llc size
+#else
+    assert(k2_total_pinned_chunks * k2_chunk_size >= (4 * 1024 * 1024)); // >= 64MB l2 size
+    // assert ( k2_total_pinned_chunks * k2_chunk_size  <= (64 * 1024 * 1024) ); // <= 64MB llc size
+#endif
 
 #if DEBUG_LEVEL >= 0
     cout << "K2 pinned data: "
@@ -310,7 +342,11 @@ int main(int argc, char **argv)
     for (int k2_bpx = K2_BPX_MIN; k2_bpx <= K2_BPX_MAX; k2_bpx++)
     {
         MeasurementSeries k1_times, k2_times;
+#if 1
+        const int64_t k1_iters = (int64_t)100000;
+#else
         const int64_t k1_iters = max(LEN, (int64_t)100000);
+#endif
         // Multiplying by > 1 may make k2 to more outlive k1
         // but benefit is not clear for now, whereas it increases total run time too much
         const int64_t k2_iters = k1_iters * 1;
