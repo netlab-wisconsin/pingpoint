@@ -174,7 +174,7 @@ void measure()
 
             for (size_t k = 0; k < n_dtype_dbuf; k++)
             {
-                uint32_t min_cycles = 0xFFFFFFFF;
+                uint32_t min_cycles = UINT32_MAX;
                 int min_xcc = -1;
                 for (int x = 0; x < XCD_NUM; x++)
                 {

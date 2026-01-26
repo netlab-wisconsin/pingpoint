@@ -260,7 +260,7 @@ int main() {
     vector<int> h_home(n_chunks);
     // int h_home[n_chunks]; // troubleshooting: stack overflow!
     for (size_t i = 0; i < n_chunks; i++) {
-        uint32_t min_cycles = 0xFFFFFFFF;
+        uint32_t min_cycles = UINT32_MAX;
         int min_xcc = -1;
         for (int xcc = 0; xcc < XCDS_NUM; xcc++) {
             uint32_t c = h_cycles[xcc][i];
@@ -351,7 +351,7 @@ int main() {
         // for avg lat calc
         double avg_xcd_cycles = 0.0;
         // for global bw calc
-        uint32_t min_xcd_cycles_start = 0xFFFFFFFF;
+        uint32_t min_xcd_cycles_start = UINT32_MAX;
         uint32_t max_xcd_cycles_stop = 0;
 
         for (int tbid_in_xcd = 0; tbid_in_xcd < BPX; tbid_in_xcd++) {

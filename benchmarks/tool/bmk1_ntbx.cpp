@@ -106,7 +106,7 @@ int main() {
     
     int h_home[data_size / CHUNK_SIZE];
     for (size_t i = 0; i < (data_size / CHUNK_SIZE); i++) {
-        uint32_t min_cycles = 0xFFFFFFFF;
+        uint32_t min_cycles = UINT32_MAX;
         int min_xcc = -1;
         for (int xcc = 0; xcc < XCDS_NUM; xcc++) {
             uint32_t c = h_cycles[xcc][i];

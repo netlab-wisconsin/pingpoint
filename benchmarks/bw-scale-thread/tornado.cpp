@@ -295,7 +295,7 @@ int main() {
         }
 
         for (size_t k = 0; k < n_chunks; k++) {
-            uint32_t min_cycles = 0xFFFFFFFF;
+            uint32_t min_cycles = UINT32_MAX;
             int min_xcc = -1;
             for (int x = 0; x < XCDS_NUM; x++) {
                 uint32_t c = h_cycles[x][k];
@@ -424,7 +424,7 @@ int main() {
         // for avg lat calc
         double avg_xcd_cycles = 0.0;
         // for global bw calc
-        uint32_t min_xcd_cycles_start = 0xFFFFFFFF;
+        uint32_t min_xcd_cycles_start = UINT32_MAX;
         uint32_t max_xcd_cycles_stop = 0;
 
         // set dst xcd as tornado

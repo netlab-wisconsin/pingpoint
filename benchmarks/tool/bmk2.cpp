@@ -88,7 +88,7 @@ __global__ void k(char *data, uint32_t **d_cycles, size_t size) {
     uint32_t min_bid_per_cid[num_ccls];
     for (int cid = 0; cid < num_ccls; cid++) {
         // get bid with min d_cycles[bid][cid]
-        uint32_t min_cycles = 0xFFFFFFFF;;
+        uint32_t min_cycles = UINT32_MAX;;
         int min_bid = -1;
         for (size_t b = 0; b < BLOCKS_NUM; b++) {
             uint32_t cycles = d_cycles[b][cid];

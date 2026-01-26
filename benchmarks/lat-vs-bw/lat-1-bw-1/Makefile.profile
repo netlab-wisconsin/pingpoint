@@ -1,0 +1,43 @@
+BASE_DIR := $(shell pwd)
+BIN_DIR  := $(BASE_DIR)/bin
+
+HIP_HOME 	:= /opt/rocm-7.1.0
+OPTS 		:= --amdgpu-target=gfx942
+CC 			:= $(HIP_HOME)/bin/hipcc
+CCFLAGS 	:= 
+INCLUDES 	:= -I$(HIP_HOME)/include/rocprofiler/ -I$(HIP_HOME)/hsa/include/hsa
+LDFLAGS 	:= -L$(HIP_HOME)/lib/rocprofiler -lrocprofiler64 -lhsa-runtime64 -lrocm_smi64 -ldl
+
+K1_PINNED_XCD := 0
+K1_PINNED_HBM := 0
+
+K2_PINNED_XCD := 1
+K2_PINNED_HBM := 1
+
+# Min nblocks per xcd when launching fused kernel k.
+K2_BPX_MIN := 1
+# Max nblocks per xcd when launching fused kernel k
+K2_BPX_MAX := 80
+K2_TPB := 1024
+
+SUFFIX := prof
+
+# PROFILE specific flags
+CCFLAGS += -DUSE_GLOBAL_BARRIER=1 # cooperative groups conflict with rocprof
+CCFLAGS += -DEPOCHS=1 # reduce the number of epochs for profiling
+CCFLAGS += -DPROFILE=1
+
+TARGET := $(BIN_DIR)/lat_xcd_$(K1_PINNED_XCD)_hbm_$(K1_PINNED_HBM)_bw_xcd_$(K2_PINNED_XCD)_hbm_$(K2_PINNED_HBM)_bpx_$(K2_BPX_MIN)_$(K2_BPX_MAX)_tpb_$(K2_TPB)_$(SUFFIX)
+
+all: $(TARGET)
+
+$(TARGET): main.cpp main.h k1.h k2.h  
+	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) \
+	-DK1_PINNED_XCD=$(K1_PINNED_XCD) -DK2_PINNED_XCD=$(K2_PINNED_XCD) \
+	-DK1_PINNED_HBM=$(K1_PINNED_HBM) -DK2_PINNED_HBM=$(K2_PINNED_HBM) \
+	-DK2_BPX_MIN=$(K2_BPX_MIN) -DK2_BPX_MAX=$(K2_BPX_MAX) \
+	-DK2_TPB=$(K2_TPB) \
+	-o $@ $<
+
+clean: 
+	rm -f $(BIN_DIR)/*_$(SUFFIX)

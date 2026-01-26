@@ -107,7 +107,7 @@ __global__ void identify_home(T *data, uint32_t *cycles, const long long n_dtype
             );
             uint32_t end = __builtin_readcyclecounter();
             uint32_t cycle = end - start;
-            const int cycles_index = xcc_id * n_dtypes + index; 
+            const size_t cycles_index = (size_t)xcc_id * n_dtypes + index; // (01/25/25) fix: from int to size_t, to avoid overflow
             cycles[cycles_index] = cycle;
             #if USE_GLOBAL_BARRIER
             global_barrier();

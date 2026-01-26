@@ -115,7 +115,7 @@ int main() {
     
     vector<int> h_home(n_chunks);
     for (size_t i = 0; i < n_chunks; i++) {
-        uint32_t min_cycles = 0xFFFFFFFF;
+        uint32_t min_cycles = UINT32_MAX;
         int min_xcc = -1;
         for (int xcc = 0; xcc < XCDS_NUM; xcc++) {
             // uint32_t c = h_cycles[xcc][i];

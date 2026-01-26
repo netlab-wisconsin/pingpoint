@@ -176,7 +176,7 @@ int main(int argc, char **argv) {
                  vector<vector<uint32_t>> h_cycles(XCD_NUM, vector<uint32_t>(n_dtype_dbuf));
                  for(int x=0;x<XCD_NUM;x++) GPU_ERROR(hipMemcpy(h_cycles[x].data(), d_cycles+x*n_dtype_dbuf, sizeof(uint32_t)*n_dtype_dbuf, hipMemcpyDeviceToHost));
                  for(size_t k=0; k<n_dtype_dbuf; k++){
-                     uint32_t m=0xFFFFFFFF; int mx=-1;
+                     uint32_t m=UINT32_MAX; int mx=-1;
                      for(int x=0;x<XCD_NUM;x++) if(h_cycles[x][k]<m){m=h_cycles[x][k]; mx=x;}
                      uint32_t cc=get_cc(mx);
                      dtype_home_cc[k]=cc; cc_dtypes[cc].push_back(k);

@@ -14,33 +14,33 @@ namespace cg = cooperative_groups;
 
 #define USE_GLOBAL_BARRIER 0
 
-__device__ int d_barrier_count = 0;
-__device__ int d_barrier_sense = 0;
+__device__ int _d_barrier_count = 0;
+__device__ int _d_barrier_sense = 0;
 
 __device__ __forceinline__
-void global_barrier()
+void _global_barrier()
 {
     __shared__ int local_sense; // One local copy per block
     if (threadIdx.x == 0) {
-        int old_sense = d_barrier_sense;
+        int old_sense = _d_barrier_sense;
         local_sense   = !old_sense;
 
-        int arrived = atomicAdd(&d_barrier_count, 1);
+        int arrived = atomicAdd(&_d_barrier_count, 1);
         if (arrived == gridDim.x - 1) {
-            d_barrier_count = 0;
+            _d_barrier_count = 0;
             __threadfence(); // Make all global writes visible before releasing others
-            d_barrier_sense = local_sense;
+            _d_barrier_sense = local_sense;
         }
     }
     __syncthreads(); // Make sure all threads in the block see local_sense
-    while (d_barrier_sense != local_sense) {} // Spin until last block flips global sense
+    while (_d_barrier_sense != local_sense) {} // Spin until last block flips global sense
     __syncthreads(); // Ensure all threads in this block observe the sense change before proceeding
 }
 
 typedef int64_t dtype;
 
 template <typename T>
-__global__ void identify_home(T *data, uint32_t *cycles, const long long n_dtypes) {
+__global__ void _identify_home(T *data, uint32_t *cycles, const long long n_dtypes) {
     int bid = blockIdx.x;
     int tid = threadIdx.x;
     int uid = bid * blockDim.x + tid;
@@ -50,7 +50,7 @@ __global__ void identify_home(T *data, uint32_t *cycles, const long long n_dtype
 
     // printf("blockDim.x: %d, n_dtypes: %lld\n", blockDim.x, n_dtypes);
 
-    // for this bmk, both global_barrier and cooperative_groups are supported
+    // for this bmk, both _global_barrier and cooperative_groups are supported
     #if not USE_GLOBAL_BARRIER
     cg::grid_group grid = cg::this_grid();
     #endif
@@ -88,7 +88,7 @@ __global__ void identify_home(T *data, uint32_t *cycles, const long long n_dtype
             );
         }
         #if USE_GLOBAL_BARRIER
-        global_barrier();
+        _global_barrier();
         #else
         grid.sync();
         #endif
@@ -110,7 +110,7 @@ __global__ void identify_home(T *data, uint32_t *cycles, const long long n_dtype
             const size_t cycles_index = (size_t)xcc_id * n_dtypes + index; // (01/25/25) fix: from int to size_t, to avoid overflow
             cycles[cycles_index] = cycle;
             #if USE_GLOBAL_BARRIER
-            global_barrier();
+            _global_barrier();
             #else
             grid.sync();
             #endif
