@@ -10,7 +10,7 @@
 namespace cg = cooperative_groups;
 
 #define PPNT_TBID_IN_XCD 0 // ppnt thread block id within xcd
-#define DEBUG_PPNT 1
+#define DEBUG_PPNT_LEVEL 1
 
 namespace ppnt {
 
@@ -82,7 +82,7 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
     if (tbid_in_xcd == PPNT_TBID_IN_XCD) { // TODO: bw will require multi tbs for profile
         /* Run profiling */
 
-#if DEBUG_PPNT
+#if DEBUG_PPNT_LEVEL >= 1
         if (tid == 0) {
             printf("[profile] bid %d: (xcc_id: %u, se_id: %u, cu_id: %u)\n", \
                 bid, xcc_id, se_id, cu_id);
@@ -94,7 +94,7 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
             grid.sync();
 
             const PingSpec& spec = plan[i];
-#if DEBUG_PPNT
+#if DEBUG_PPNT_LEVEL >= 0
             if (bid == 0 && tid == 0) {
                 printf("spec[%d]: ping_id=%d, kind=%d, src_xcd=%d, dst_hbm=%d, iters=%zu, data_bytes=%zu, data0=%p\n", \
                     i, spec.ping_id, (int)spec.kind, spec.src_xcd, spec.dst_hbm, spec.iters, spec.data_bytes, spec.data0);
@@ -104,7 +104,7 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
             if (spec.src_xcd != xcc_id) continue; // not my ping
             if (spec.kind == PingKind::Latency) {
                 if (tid != 0) continue; // only thread 0 runs latency ping
-#if DEBUG_PPNT
+#if DEBUG_PPNT_LEVEL >= 1
                 printf("(bid:%d,tid:%d) running k1 ping (id: %d)\n", bid, tid, spec.ping_id);
 #endif
                 k1::k<k1::dtype>(
@@ -114,8 +114,8 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
                 );
                 // TODO: write results
             } else if (spec.kind == PingKind::Bandwidth) {
-#if DEBUG_PPNT
-                if (tid == 0) printf("(bid:%d) running k1 ping (id: %d)\n", bid, spec.ping_id);
+#if DEBUG_PPNT_LEVEL >= 1
+                if (tid == 0) printf("(bid:%d) running k2 ping (id: %d)\n", bid, spec.ping_id);
 #endif
                 const int k2_chunk_size = CHUNK_SIZE;
                 k2::k(
@@ -129,7 +129,7 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
                 // TODO: write results
             } else { 
                 // unknown ping kind
-#if DEBUG_PPNT
+#if DEBUG_PPNT_LEVEL >= 1
                 if (tid == 0) printf("(bid:%d) unknown ping kind %d (id: %d)\n", bid, (int)spec.kind, spec.ping_id);
                 return;
 #endif
@@ -140,7 +140,7 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
     } else {
         /* Run target fn */
         
-#if DEBUG_PPNT
+#if DEBUG_PPNT_LEVEL >= 1
         if (tid == 0) {
             printf("[target] bid %d: (xcc_id: %u, se_id: %u, cu_id: %u)\n", \
                 bid, xcc_id, se_id, cu_id);
