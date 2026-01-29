@@ -10,7 +10,7 @@
 namespace cg = cooperative_groups;
 
 #define PPNT_TBID_IN_XCD 0 // ppnt thread block id within xcd
-#define DEBUG_PPNT 1
+#define DEBUG_PPNT 0
 
 namespace ppnt {
 
@@ -34,10 +34,11 @@ struct PingSpec {
 
 struct PingOut {
     uint16_t ping_id;
-    double total_time_ms;
-    double time_per_iter_ms;
-    double bandwidth_gbps; // for bandwidth ping
-    double latency_us;     // for latency ping
+    PingKind kind;
+    uint16_t src_xcd;
+    uint16_t dst_hbm;
+    size_t iters;
+    uint64_t *iterClk; 
 };
 
 __device__ __forceinline__
@@ -87,6 +88,9 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
 #endif
 
         for (int i = 0; i < N_plan; i++) {
+            // Synchronize the coop grid before each ping/replay (#1)
+            grid.sync();
+
             const PingSpec& spec = plan[i];
 #if DEBUG_PPNT
             if (bid == 0 && tid == 0) {
@@ -95,14 +99,17 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
             }
 #endif
 
-            // TODO: sync?
             if (spec.src_xcd != xcc_id) continue; // not my ping
             if (spec.kind == PingKind::Latency) {
+                if (tid != 0) continue; // only thread 0 runs latency ping
 #if DEBUG_PPNT
-                // if (tid == 0) printf("(bid:%d) running k1 ping (id: %d)\n", bid, spec.ping_id);
                 printf("(bid:%d,tid:%d) running k1 ping (id: %d)\n", bid, tid, spec.ping_id);
 #endif
-                k1::k<k1::dtype>((k1::dtype*)spec.data0, nullptr, spec.iters);
+                k1::k<k1::dtype>(
+                    (k1::dtype*)spec.data0, nullptr, spec.iters,
+                    /* Pingout */
+                    out[i].iterClk
+                );
                 // TODO: write results
             } else if (spec.kind == PingKind::Bandwidth) {
 #if DEBUG_PPNT
@@ -115,6 +122,8 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
                     (uint64_t*)spec.data2, (uint64_t*)spec.data3,
                     k2_sink, (spec.data_bytes / k2_chunk_size),
                     k2_chunk_size, spec.iters,
+                    /* Pingout */
+                    out[i].iterClk
                 );
                 // TODO: write results
             } else { 
@@ -136,7 +145,24 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
                 bid, xcc_id, se_id, cu_id);
         }
 #endif
+
+#if 0
         target_fn(targs, bid, tid, gridDim.x, blockDim.x);
+#else
+        // Target kernel replay N_plan times for profiling...
+        for (int i = 0; i < N_plan; i++) {
+            // Synchronize the coop grid before each ping/replay (#1)
+            grid.sync();
+            
+            target_fn(targs, bid, tid, gridDim.x, blockDim.x);
+            // target_fn(targs, 
+            //           physical_to_logical_bid_skip_one(bid, n_tbs_in_xcd, PPNT_TBID_IN_XCD), 
+            //           tid, 
+            //           gridDim.x - XCD_NUM, // adjusted gridDim.x
+            //           blockDim.x);
+
+        }
+#endif
     }
 }
 

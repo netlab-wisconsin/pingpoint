@@ -235,7 +235,11 @@ int home_identification(
 
 // Note (01/28/25) Converted to __device__ to call in fused ppnt kernel
 template <typename T>
-__device__ void k(T *buf, T *__restrict__ dummy_buf, const int64_t N) {
+__device__ void k(
+    T *buf, T *__restrict__ dummy_buf, const int64_t N,
+    /* Pingout */ 
+    uint64_t *po_iterClk
+) {
     const int bid = blockIdx.x;
     const int tid = threadIdx.x;
     const int uid = bid * blockDim.x + tid;
@@ -261,7 +265,18 @@ __device__ void k(T *buf, T *__restrict__ dummy_buf, const int64_t N) {
     for (int64_t n = 0; n < N; n += unroll_factor) {
 #pragma unroll
         for (int u = 0; u < unroll_factor; u++) {
+            // Note (01/28/25) inserted for pingout
+            uint64_t start = 0;
+            start = __builtin_readcyclecounter();
+            asm volatile("s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t"); 
+
             idx = (T *)*idx;
+
+            // Note (01/28/25) inserted for pingout
+            uint64_t end = 0;
+            asm volatile("s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t");
+            end = __builtin_readcyclecounter();
+            po_iterClk[n + u] = end - start;
         }
     }
 

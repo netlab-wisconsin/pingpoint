@@ -6,6 +6,7 @@
 #include <vector>
 #include <random>
 #include <cmath>
+#include <iomanip>
 
 #include "main.h"
 #include "ppnt.h"
@@ -13,7 +14,7 @@
 #include "k1.h"
 #include "k2.h"
 
-#define DEBUG_LEVEL 1
+#define DEBUG_LEVEL 0 // 0: PPNT, 1: Memalloc, 2+: Misc
 #define FAST 1 // set for faster debugging, set 0 for actual measurement
 
 using namespace std;
@@ -313,30 +314,51 @@ int main(int argc, char **argv) {
         // p.data_bytes      = --- IGNORE ---
         p.data0           = (uint64_t*)k1_dbuf_start_ptrs_per_hbm[p.dst_hbm]; // casting k1::dtype* to uint64_t* to match ppnt spec
         h_plan.push_back(p);
+
+        // -- Add Latency Out ---
+        ppnt::PingOut o;
+        o.ping_id = p.ping_id;
+        o.kind    = p.kind;
+        o.src_xcd = p.src_xcd;
+        o.dst_hbm = p.dst_hbm;
+        o.iters   = p.iters;
+        gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * o.iters ));
+        h_out.push_back(o);
     }
 
-    {
-        // --- Add Bandwidth Plan ---
-        ppnt::PingSpec p;
-        p.ping_id         = (int)h_plan.size(); // auto increments
-        p.kind            = ppnt::PingKind::Bandwidth;
-        p.src_xcd         = 0;
-        p.dst_hbm         = 0;
-        p.iters           = k2_profiler_iters; 
-        p.data_bytes      = CHUNK_SIZE * k2_min_num_chunks_over_n_datas[p.dst_hbm]; // per data
-        p.data0           = k2_d_chunks_per_hbm[0] + k2_d_chunks_per_hbm_offset[0][p.dst_hbm];
-        p.data1           = k2_d_chunks_per_hbm[1] + k2_d_chunks_per_hbm_offset[1][p.dst_hbm];
-        p.data2           = k2_d_chunks_per_hbm[2] + k2_d_chunks_per_hbm_offset[2][p.dst_hbm];
-        p.data3           = k2_d_chunks_per_hbm[3] + k2_d_chunks_per_hbm_offset[3][p.dst_hbm];
-        h_plan.push_back(p);
-    }
+    // {
+    //     // --- Add Bandwidth Plan ---
+    //     ppnt::PingSpec p;
+    //     p.ping_id         = (int)h_plan.size(); // auto increments
+    //     p.kind            = ppnt::PingKind::Bandwidth;
+    //     p.src_xcd         = 0;
+    //     p.dst_hbm         = 0;
+    //     p.iters           = k2_profiler_iters; 
+    //     p.data_bytes      = CHUNK_SIZE * k2_min_num_chunks_over_n_datas[p.dst_hbm]; // per data
+    //     p.data0           = k2_d_chunks_per_hbm[0] + k2_d_chunks_per_hbm_offset[0][p.dst_hbm];
+    //     p.data1           = k2_d_chunks_per_hbm[1] + k2_d_chunks_per_hbm_offset[1][p.dst_hbm];
+    //     p.data2           = k2_d_chunks_per_hbm[2] + k2_d_chunks_per_hbm_offset[2][p.dst_hbm];
+    //     p.data3           = k2_d_chunks_per_hbm[3] + k2_d_chunks_per_hbm_offset[3][p.dst_hbm];
+    //     h_plan.push_back(p);
 
-    // Copy plan to device
+    //     // -- Add Bandwidth Out ---
+    //     ppnt::PingOut o;
+    //     o.ping_id = p.ping_id;
+    //     o.kind    = p.kind;
+    //     o.src_xcd = p.src_xcd;
+    //     o.dst_hbm = p.dst_hbm;
+    //     o.iters   = p.iters;
+    //     gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * o.iters ));
+    //     h_out.push_back(o);
+    // }
+
+    // Copy plan/out to device
     size_t n_plan = h_plan.size();
     if (n_plan > 0) {
         gpuErrchk(hipMalloc(&d_plan, sizeof(ppnt::PingSpec) * n_plan));
         gpuErrchk(hipMalloc(&d_out,  sizeof(ppnt::PingOut)  * n_plan));
         gpuErrchk(hipMemcpy(d_plan, h_plan.data(), sizeof(ppnt::PingSpec) * n_plan, hipMemcpyHostToDevice));
+        gpuErrchk(hipMemcpy(d_out,  h_out.data(),  sizeof(ppnt::PingOut)  * n_plan, hipMemcpyHostToDevice));
     }
 
     // =============================================================================================
@@ -418,9 +440,10 @@ int main(int argc, char **argv) {
         dim3 profile_gridD(XCD_NUM); // 1 profile TB per XCD
         dim3 gridD(target_gridD.x + profile_gridD.x);
 
-#if DEBUG_LEVEL >= 1
+#if DEBUG_LEVEL >= 0
         cout << "[PPNT] " 
              << "Launching DISPATCH with "
+             << n_plan << " ping plans using "
              << "gridDim(" << gridD.x << "," << gridD.y << "," << gridD.z << ")" << " "
              << "blockDim(" << blockD.x << "," << blockD.y << "," << blockD.z << ")" << " "
              << "\n" << flush;
@@ -429,6 +452,31 @@ int main(int argc, char **argv) {
             (void*)ppnt::fused_kernel<DispatchTargetFn, DispatchArgs>,
             dim3(gridD), dim3(blockD),
             kernelArgs, 0, stream));
+        gpuErrchk(hipStreamSynchronize(stream));
+
+        // Check PingOut results
+        // TODO: temporarily done here, move to end of main later on.
+        for (size_t i = 0; i < n_plan; i++) {
+            ppnt::PingOut o;
+            gpuErrchk(hipMemcpy(&o, &d_out[i], sizeof(ppnt::PingOut), hipMemcpyDeviceToHost));
+
+            // Compute average cycles per iteration
+            uint64_t total_cycles = 0;
+            for (size_t it = 0; it < o.iters; it++) {
+                total_cycles += o.iterClk[it];
+            }
+            double avg_cycles = (double)total_cycles / (double)o.iters;
+
+            // Report
+            cout << "[PPNT] Ping id=" << i << " "
+                 << "kind=" << ((o.kind == ppnt::PingKind::Latency) ? "Latency" : "Bandwidth") << " "
+                 << "src_xcd=" << o.src_xcd << " "
+                 << "dst_hbm=" << o.dst_hbm << " "
+                 << "iters=" << o.iters << " "
+                 << fixed << setprecision(1)
+                 << "avg_cycles=" << avg_cycles << " "
+                 << "\n" << flush;
+        }
 
     } /* ppnt */
 

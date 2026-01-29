@@ -251,8 +251,10 @@ int home_identification(
 // - k2_chunks_size[] to k2_n_chunks
 __device__ void k(
     uint64_t *k2_chunks1, uint64_t *k2_chunks2, uint64_t *k2_chunks3, uint64_t *k2_chunks4,
-    float *k2_sink, size_t k2_n_chunks, const size_t k2_chunk_size, const int64_t k2_N)
-{
+    float *k2_sink, size_t k2_n_chunks, const size_t k2_chunk_size, const int64_t k2_N,
+    /* Pingout */ 
+    uint64_t *po_iterClk
+) {
 
     int bid = blockIdx.x;
     int tid = threadIdx.x;
