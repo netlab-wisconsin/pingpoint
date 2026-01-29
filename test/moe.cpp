@@ -185,7 +185,7 @@ int main(int argc, char **argv) {
     // Chunk pointers, sorted by allocated HBM (per each data)
     vector<uint64_t*> k2_d_chunks_per_hbm(k2_n_datas);
     // Starting offset for each HBM's chunks in the k2_d_chunks_per_hbm (per each data)
-    vector<size_t*> k2_d_chunks_per_hbm_offset(k2_n_datas); 
+    vector<vector<size_t>> k2_h_offsets(k2_n_datas, vector<size_t>(HBM_NUM));
     // Minimal allocated #chunks across k2 datas (per HBM)
     // e.g, if 100/90/80/70 chunks allocated to hbm0 in datas 0/1/2/3, k2_d_chunks_per_hbm_count[0] = 70
     vector<size_t> k2_min_num_chunks_over_n_datas(HBM_NUM);
@@ -244,12 +244,11 @@ int main(int argc, char **argv) {
 
         for (int i = 0; i < k2_n_datas; i++) {
             gpuErrchk(hipMalloc((void**)&k2_d_chunks_per_hbm[i], sizeof(uint64_t) * k2_n_chunks ));
-            gpuErrchk(hipMalloc((void**)&k2_d_chunks_per_hbm_offset[i], sizeof(size_t) * XCD_NUM));
             size_t _offset = 0;
             for (int x = 0; x < XCD_NUM; x++) {
                 size_t _n_chunks = k2_h_xcd_chunks_size[i][x];
                 gpuErrchk(hipMemcpy(&k2_d_chunks_per_hbm[i][_offset], k2_xcd_chunks[i][x].data(), sizeof(uint64_t) * _n_chunks, hipMemcpyHostToDevice));
-                k2_d_chunks_per_hbm_offset[i][x] = _offset;
+                k2_h_offsets[i][x] = _offset; // Store in host vector
                 _offset += _n_chunks;
             }
         }
@@ -339,10 +338,14 @@ int main(int argc, char **argv) {
         p.dst_hbm         = 0;
         p.iters           = k2_profile_iters; 
         p.data_bytes      = CHUNK_SIZE * k2_min_num_chunks_over_n_datas[p.dst_hbm]; // per data
-        p.data0           = k2_d_chunks_per_hbm[0] + k2_d_chunks_per_hbm_offset[0][p.dst_hbm];
-        p.data1           = k2_d_chunks_per_hbm[1] + k2_d_chunks_per_hbm_offset[1][p.dst_hbm];
-        p.data2           = k2_d_chunks_per_hbm[2] + k2_d_chunks_per_hbm_offset[2][p.dst_hbm];
-        p.data3           = k2_d_chunks_per_hbm[3] + k2_d_chunks_per_hbm_offset[3][p.dst_hbm];
+        p.data0           = k2_d_chunks_per_hbm[0] + k2_h_offsets[0][p.dst_hbm];
+        p.data1           = k2_d_chunks_per_hbm[1] + k2_h_offsets[1][p.dst_hbm];
+        p.data2           = k2_d_chunks_per_hbm[2] + k2_h_offsets[2][p.dst_hbm];
+        p.data3           = k2_d_chunks_per_hbm[3] + k2_h_offsets[3][p.dst_hbm];
+        // Note (01/28/25) This will definitely lead to OOB if k2_bpx > 1. Must modify the current implementation of 
+        // having `XCD_NUM` as a substitute for real gridDim.x of the k2 profiler kernel
+        // TODO: fix!!
+        gpuErrchk(hipMalloc(&p.sink, sizeof(float) * (TARGET_BLOCKDIM_X * XCD_NUM))); 
         h_plan.push_back(p);
 
         // -- Add Bandwidth Out ---

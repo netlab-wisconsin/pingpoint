@@ -346,7 +346,10 @@ __device__ void k(
         sink3 += reg_in1.w + reg_in2.w + reg_in3.w + reg_in4.w;
     }
 
+#if 0
+    // TODO: enable this part after logical bid setting is implemented
     k2_sink[uid] = sink0 + sink1 + sink2 + sink3; // prevent optimization
+#endif
 }
 
 } // namespace k2

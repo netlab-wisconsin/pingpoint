@@ -29,7 +29,9 @@ struct PingSpec {
     uint64_t *data0; 
     uint64_t *data1; 
     uint64_t *data2; 
-    uint64_t *data3; 
+    uint64_t *data3;
+    // only for k2
+    float *sink;
 };
 
 struct PingOut {
@@ -116,11 +118,10 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
                 if (tid == 0) printf("(bid:%d) running k1 ping (id: %d)\n", bid, spec.ping_id);
 #endif
                 const int k2_chunk_size = CHUNK_SIZE;
-                float *k2_sink; // dummy sink
                 k2::k(
                     (uint64_t*)spec.data0, (uint64_t*)spec.data1,
                     (uint64_t*)spec.data2, (uint64_t*)spec.data3,
-                    k2_sink, (spec.data_bytes / k2_chunk_size),
+                    spec.sink, (spec.data_bytes / k2_chunk_size),
                     k2_chunk_size, spec.iters,
                     /* Pingout */
                     out[i].iterClk
