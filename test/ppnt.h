@@ -10,7 +10,7 @@
 namespace cg = cooperative_groups;
 
 #define PPNT_TBID_IN_XCD 0 // ppnt thread block id within xcd
-#define DEBUG_PPNT_LEVEL 1
+#define DEBUG_PPNT_LEVEL 0
 
 namespace ppnt {
 
@@ -23,14 +23,14 @@ struct PingSpec {
     uint16_t dst_hbm;
     size_t iters;
     size_t data_bytes;
-    // only data0 is used for k1 (latency ping)
-    // for k2 (bandwidth ping), we use data0 ~ data3
-    // cast to int64_t for k1
+    // only for k1
+    k1::dtype *data;
+    k1::dtype *dummy; // to avoid compiler optimization
+    // only for k2
     uint64_t *data0; 
     uint64_t *data1; 
     uint64_t *data2; 
     uint64_t *data3;
-    // only for k2
     float *sink;
 };
 
@@ -108,7 +108,7 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
                 printf("(bid:%d,tid:%d) running k1 ping (id: %d)\n", bid, tid, spec.ping_id);
 #endif
                 k1::k<k1::dtype>(
-                    (k1::dtype*)spec.data0, nullptr, spec.iters,
+                    spec.data, spec.dummy, spec.iters,
                     /* Pingout */
                     out[i].iterClk
                 );
@@ -119,8 +119,8 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
 #endif
                 const int k2_chunk_size = CHUNK_SIZE;
                 k2::k(
-                    (uint64_t*)spec.data0, (uint64_t*)spec.data1,
-                    (uint64_t*)spec.data2, (uint64_t*)spec.data3,
+                    spec.data0, spec.data1,
+                    spec.data2, spec.data3,
                     spec.sink, (spec.data_bytes / k2_chunk_size),
                     k2_chunk_size, spec.iters,
                     /* Pingout */

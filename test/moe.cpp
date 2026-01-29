@@ -11,6 +11,7 @@
 #include <cinttypes> 
 
 #include "../mem_bench/gpu-clock.cuh"
+#include "../mem_bench/MeasurementSeries.hpp"
 
 #include "main.h"
 #include "ppnt.h"
@@ -18,7 +19,7 @@
 #include "k1.h"
 #include "k2.h"
 
-#define DEBUG_LEVEL 2 // 0: PPNT, 1: Memalloc, 2+: Misc
+#define DEBUG_LEVEL 1 // 0: PPNT, 1: Memalloc, 2+: Misc
 #define FAST 1 // set for faster debugging, set 0 for actual measurement
 
 using namespace std;
@@ -36,10 +37,14 @@ int main(int argc, char **argv) {
     // Starting pointers to pchase in each HBM
     // Original varname was dbuf_start_vector
     vector<k1::dtype*> k1_dbuf_start_ptrs_per_hbm(HBM_NUM, nullptr);
+    // (Note 01/29/26) dummy_buf is very important to avoid compiler optimization
+    // inside the k1 kernel.
+    k1::dtype *k1_dummy_buf;
     size_t k1_profile_iters = -1;
     { /* k1 setup scope */
         k1::dtype *dbuf_base = nullptr;
-
+        gpuErrchk(hipMallocManaged(&k1_dummy_buf, sizeof(k1::dtype)));
+        k1_dummy_buf[0] = 0;
         /*
          * LEN: The number of cache lines targeted for the pointer-chasing chain per HBM stack.
          * n_dtype_dbuf: Size of primary data buffer (dbuf_base) in unit dtypes
@@ -152,6 +157,7 @@ int main(int argc, char **argv) {
                         cerr << "BUG: elem OOB: cur_elem=" << cur_elem
                                 << " next_elem=" << next_elem
                                 << " n_dtype_dbuf=" << n_dtype_dbuf << "\n";
+                        gpuErrchk(hipFree(k1_dummy_buf));
                         gpuErrchk(hipFree(dbuf_base));
                         return 1;
                     }
@@ -178,7 +184,7 @@ int main(int argc, char **argv) {
         gpuErrchk(hipDeviceSynchronize());
     }
 
-    
+
     // =============================================================================================
     // K2 SETUP
     // =============================================================================================
@@ -310,7 +316,7 @@ int main(int argc, char **argv) {
     ppnt::PingSpec *d_plan;
     ppnt::PingOut  *d_out;
 
-    {
+    { 
         // --- Add Latency Plan ---
         ppnt::PingSpec p;
         p.ping_id         = (int)h_plan.size(); // auto increments
@@ -319,7 +325,8 @@ int main(int argc, char **argv) {
         p.dst_hbm         = 0;
         p.iters           = k1_profile_iters; 
         // p.data_bytes      = --- IGNORE ---
-        p.data0           = (uint64_t*)k1_dbuf_start_ptrs_per_hbm[p.dst_hbm]; // casting k1::dtype* to uint64_t* to match ppnt spec
+        p.data            = k1_dbuf_start_ptrs_per_hbm[p.dst_hbm];
+        p.dummy           = k1_dummy_buf; // to avoid compiler optimization
         h_plan.push_back(p);
 
         // -- Add Latency Out ---
@@ -333,6 +340,57 @@ int main(int argc, char **argv) {
         h_out.push_back(o);
     }
 
+    { 
+        // --- Add Latency Plan ---
+        ppnt::PingSpec p;
+        p.ping_id         = (int)h_plan.size(); // auto increments
+        p.kind            = ppnt::PingKind::Latency;
+        p.src_xcd         = 0;
+        p.dst_hbm         = 2;
+        p.iters           = k1_profile_iters; 
+        // p.data_bytes      = --- IGNORE ---
+        p.data            = k1_dbuf_start_ptrs_per_hbm[p.dst_hbm];
+        p.dummy           = k1_dummy_buf; // to avoid compiler optimization
+        h_plan.push_back(p);
+
+        // -- Add Latency Out ---
+        ppnt::PingOut o;
+        o.ping_id = p.ping_id;
+        o.kind    = p.kind;
+        o.src_xcd = p.src_xcd;
+        o.dst_hbm = p.dst_hbm;
+        o.iters   = p.iters;
+        gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * o.iters ));
+        h_out.push_back(o);
+    }
+
+    // for (int x = 0; x < XCD_NUM; x++) {
+    //     for (int v = 0; v < HBM_NUM; v++) {
+    //         {/*scope*/ 
+    //             // --- Add Latency Plan ---
+    //             ppnt::PingSpec p;
+    //             p.ping_id         = (int)h_plan.size(); // auto increments
+    //             p.kind            = ppnt::PingKind::Latency;
+    //             p.src_xcd         = x;
+    //             p.dst_hbm         = v;
+    //             p.iters           = k1_profile_iters; 
+    //             // p.data_bytes      = --- IGNORE ---
+    //             p.data            = k1_dbuf_start_ptrs_per_hbm[p.dst_hbm];
+    //             p.dummy           = k1_dummy_buf; // to avoid compiler optimization
+    //             h_plan.push_back(p);
+
+    //             // -- Add Latency Out ---
+    //             ppnt::PingOut o;
+    //             o.ping_id = p.ping_id;
+    //             o.kind    = p.kind;
+    //             o.src_xcd = p.src_xcd;
+    //             o.dst_hbm = p.dst_hbm;
+    //             o.iters   = p.iters;
+    //             gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * o.iters ));
+    //             h_out.push_back(o);
+    //         }/*scope*/
+    //     }
+    // }
 //     {
 //         // --- Add Bandwidth Plan ---
 //         ppnt::PingSpec p;
@@ -482,18 +540,22 @@ int main(int argc, char **argv) {
             gpuErrchk(hipMemcpy(h_iterClk.data(), o.iterClk, sizeof(uint64_t) * o.iters, hipMemcpyDeviceToHost));
 
             // Compute average cycles per iteration
-            uint64_t total_cycles = 0;
+            MeasurementSeries cycles;
             for (size_t it = 0; it < o.iters; it++) {
-                total_cycles += h_iterClk[it];
+                cycles.add(h_iterClk[it]);
+#if DEBUG_LEVEL >= 3
+                cout << "[PPNT] Ping id=" << i << " iter=" << it << " cycles=" << h_iterClk[it] << "\n" << flush;
+#endif
             }
-            const double avg_cycles = (double)total_cycles / (double)o.iters;
-            const double avg_ns = (avg_cycles / (double)clock) * 1e3; // 1e3 as clock in MHz 
+            // 1e3 as clock in MHz
+            const double dt_mean = cycles.value(); const double ns_mean = dt_mean / (double)clock * 1e3;
+            const double dt_max  = cycles.getPercentile(0.9); const double ns_max  = dt_max  / (double)clock * 1e3;
 
             // Compute bandwidth for Bandwidth pings
             string bw_str = "N/A"; // in GB/s
             if (o.kind == ppnt::PingKind::Bandwidth) {
                 size_t iter_bytes = blockD.x * k2_n_datas * 16;
-                double bw_gbps = ((double)iter_bytes / (avg_ns)) ; // GB/s
+                double bw_gbps = ((double)iter_bytes / (ns_mean)) ; // GB/s
                 bw_str = to_string(bw_gbps);
             }
 
@@ -504,8 +566,9 @@ int main(int argc, char **argv) {
                  << "dst_hbm=" << o.dst_hbm << " "
                  << "iters=" << o.iters << " "
                  << fixed << setprecision(1)
-                 << "avg_ns=" << avg_ns << " "
-                 << "avg_GBps=" << bw_str << " "
+                 << "mean_ns=" << ns_mean << " "
+                 << "p90_ns=" << ns_max << " "
+                 << "GBps=" << bw_str << " "
                  << "\n" << flush;
         }
 

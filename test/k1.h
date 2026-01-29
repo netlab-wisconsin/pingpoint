@@ -253,29 +253,30 @@ __device__ void k(
     assert (se_id == se && cu_id == cu); // must be set by host code
     if (xcc_id != xcd) return; // prelude xcd
 #if DEBUG_K1_KERNEL
-    printf("(bid:%d,tid:%d,uid:%d) k1 launched on xcd:%u se:%u cu:%u\n",
-           bid, tid, uid, xcc_id, se_id, cu_id);
+    // printf("(bid:%d,tid:%d,uid:%d) k1 launched on xcd:%u se:%u cu:%u\n",
+    //        bid, tid, uid, xcc_id, se_id, cu_id);
 #endif
 #endif
 
     T *idx = buf;
-
     const int unroll_factor = 32;
 #pragma unroll 1
     for (int64_t n = 0; n < N; n += unroll_factor) {
 #pragma unroll
         for (int u = 0; u < unroll_factor; u++) {
+#if DEBUG_K1_KERNEL
+            printf("(bid:%d,tid:%d,uid:%d) k1 idx[%ld]=%p\n", bid, tid, uid, n + u, idx);
+#endif 
+
             // Note (01/28/25) inserted for pingout
-            uint64_t start = 0;
-            start = __builtin_readcyclecounter();
-            asm volatile("s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t"); 
+            uint64_t start = __builtin_readcyclecounter();
+            asm volatile("" ::: "memory");
 
             idx = (T *)*idx;
 
             // Note (01/28/25) inserted for pingout
-            uint64_t end = 0;
-            asm volatile("s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t");
-            end = __builtin_readcyclecounter();
+            asm volatile("s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t" ::: "memory");
+            uint64_t end = __builtin_readcyclecounter();
             po_iterClk[n + u] = end - start;
         }
     }
