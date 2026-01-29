@@ -8,6 +8,7 @@
 #include <cmath>
 #include <iomanip>
 #include <algorithm>
+#include <cinttypes> 
 
 #include "../mem_bench/gpu-clock.cuh"
 
@@ -17,8 +18,8 @@
 #include "k1.h"
 #include "k2.h"
 
-#define DEBUG_LEVEL 0 // 0: PPNT, 1: Memalloc, 2+: Misc
-#define FAST 0 // set for faster debugging, set 0 for actual measurement
+#define DEBUG_LEVEL 2 // 0: PPNT, 1: Memalloc, 2+: Misc
+#define FAST 1 // set for faster debugging, set 0 for actual measurement
 
 using namespace std;
 
@@ -31,7 +32,7 @@ int main(int argc, char **argv) {
     // =============================================================================================
     // K1 SETUP
     // =============================================================================================
-
+    
     // Starting pointers to pchase in each HBM
     // Original varname was dbuf_start_vector
     vector<k1::dtype*> k1_dbuf_start_ptrs_per_hbm(HBM_NUM, nullptr);
@@ -39,14 +40,20 @@ int main(int argc, char **argv) {
     { /* k1 setup scope */
         k1::dtype *dbuf_base = nullptr;
 
+        /*
+         * LEN: The number of cache lines targeted for the pointer-chasing chain per HBM stack.
+         * n_dtype_dbuf: Size of primary data buffer (dbuf_base) in unit dtypes
+         * n_cl_dbuf: Size of primary data buffer (dbuf_base) in unit cache lines
+         */
+
 #if (FAST)
         // When profiling/fast, use reduced LEN with *2 mult factor to avoid below OOB error
         // But don't further reduce LEN. 1<<15 is almost minimal for bypassing L2.
-        const size_t LEN = (1 << 15);
+        const size_t LEN = (1 << 16); // 8MB (per HBM)
         const size_t multiplicative_factor = XCD_NUM * 2;
         k1_profile_iters = 100000;
 #elif 1
-        const size_t LEN = (1 << 22);
+        const size_t LEN = (1 << 22); // 512MB (per HBM)
         const size_t multiplicative_factor = XCD_NUM * 1;
         k1_profile_iters = max(LEN, 100000);
 #else
@@ -64,13 +71,13 @@ int main(int argc, char **argv) {
         const size_t n_cl_dbuf = n_dtype_dbuf / (cl_size * skip_factor);
         gpuErrchk(hipMalloc(&dbuf_base, n_dtype_dbuf * sizeof(k1::dtype)));
 
-        // Per-dtype xcd identification.
+        // Per-dtype hbm identification.
         vector<uint32_t> dtype_home_xcd(n_dtype_dbuf, (uint32_t)-1);
-        vector<vector<uint32_t>> xcd_dtypes(XCD_NUM);
+        vector<vector<uint32_t>> hbm_dtypes(HBM_NUM);
 
-        // Per-cacheline xcd identification.
+        // Per-cacheline hbm identification.
         vector<uint32_t> cl_home_xcd(n_cl_dbuf, (uint32_t)-1);
-        vector<vector<uint32_t>> xcd_cls(XCD_NUM);
+        vector<vector<uint32_t>> hbm_cls(HBM_NUM);
 
         // Data home identification
         if (k1::home_identification(
@@ -82,32 +89,28 @@ int main(int argc, char **argv) {
                 skip_factor,
                 dtype_home_xcd,
                 cl_home_xcd,
-                xcd_dtypes,
-                xcd_cls) == -1)
+                hbm_dtypes,
+                hbm_cls) == -1)
             return -1;
 
 #if DEBUG_LEVEL >= 1
-        for (int x = 0; x < XCD_NUM; x++) {
-            string level = xcd_dtypes[x].size() * sizeof(k1::dtype) > L2_SIZE ? 
-                        (xcd_dtypes[x].size() * sizeof(k1::dtype) > LLC_SIZE ? "hbm" : "llc") 
+        for (int v = 0; v < HBM_NUM; v++) {
+            string level = hbm_dtypes[v].size() * sizeof(k1::dtype) > L2_SIZE ? 
+                        (hbm_dtypes[v].size() * sizeof(k1::dtype) > LLC_SIZE ? "hbm" : "llc") 
                         : "l2";
             assert (level != "l2"); // K1 data should be at least in LLC
-            cout << "K1 pinned data: " << "hbm" << x << " "
-                << xcd_dtypes[x].size() * sizeof(k1::dtype) / (1024 * 1024) << "MB" << " "
+            cout << "K1 pinned data: " << "hbm" << v << " "
+                << hbm_dtypes[v].size() * sizeof(k1::dtype) / (1024 * 1024) << "MB" << " "
                 << "at " << level << " "
                 << "\n" << flush;
         }
 #endif
 
-        // Allocate buf for the FULL n_cl_dbuf domain (i.e., full dbuf domain).
-        // In practice this means buf is sized to n_dtype_dbuf (the full dtype domain).
-        k1::dtype *buf = nullptr;
-        gpuErrchk(hipMallocManaged(&buf, n_dtype_dbuf * sizeof(k1::dtype)));
-        memset((void*)buf, 0, n_dtype_dbuf * sizeof(k1::dtype));
-
-        k1::dtype *dummy_buf = nullptr;
-        gpuErrchk(hipMallocManaged(&dummy_buf, sizeof(k1::dtype)));
-        dummy_buf[0] = 0;
+        // buf: Temporary host-side pointer-chase table, with size equaling dbuf_base
+        // each element stores the dbuf_base addr to chase next when arrived at that element
+        // (Note 01/29/26) buf is fine to be host-side buffer since it's copied back to dbuf_base.
+        // So, I changed it from hipMallocManaged to normal host vector allocation.
+        vector<k1::dtype> buf(n_dtype_dbuf, 0);
 
         random_device rd;
         mt19937 g(rd());
@@ -116,7 +119,7 @@ int main(int argc, char **argv) {
             // Choose LEN cache lines and shuffle them
             vector<uint32_t> seq(LEN);
             for (size_t i = 0; i < LEN; i++) {
-                seq[i] = xcd_cls[v][i];
+                seq[i] = hbm_cls[v][i];
             }
             shuffle(seq.begin(), seq.end(), g);
 
@@ -149,8 +152,6 @@ int main(int argc, char **argv) {
                         cerr << "BUG: elem OOB: cur_elem=" << cur_elem
                                 << " next_elem=" << next_elem
                                 << " n_dtype_dbuf=" << n_dtype_dbuf << "\n";
-                        gpuErrchk(hipFree(buf));
-                        gpuErrchk(hipFree(dummy_buf));
                         gpuErrchk(hipFree(dbuf_base));
                         return 1;
                     }
@@ -159,8 +160,9 @@ int main(int argc, char **argv) {
                     buf[cur_elem] = (k1::dtype)next_addr;
 
 #if DEBUG_LEVEL >= 3
-                    printf("cur_cl=%u lane=%d cur_elem=%zu -> next_cl=%u next_elem=%zu addr=%" PRIxPTR "\n",
-                            cur_cl, cl_lane, cur_elem, next_cl, next_elem, next_addr);
+                    uintptr_t cur_addr = (uintptr_t)dbuf_base + cur_elem * sizeof(k1::dtype);
+                    printf("cur_cl=%u lane=%d cur_elem=%zu cur_addr=%" PRIxPTR " -> next_cl=%u next_elem=%zu next_addr=%" PRIxPTR "\n",
+                        cur_cl, cl_lane, cur_elem, cur_addr, next_cl, next_elem, next_addr);
 #endif
                 }
             }
@@ -168,15 +170,15 @@ int main(int argc, char **argv) {
             // Start pointer: lane 0 of the first cache line in seq[]
             size_t start_elem = ((size_t)seq[0] * (size_t)cl_size + 0) * (size_t)skip_factor;
             k1::dtype *dbuf_start = dbuf_base + start_elem;
-
             k1_dbuf_start_ptrs_per_hbm[v] = dbuf_start;
         }
 
         // Copy the full pointer table into device allocation.
-        gpuErrchk(hipMemcpy(dbuf_base, buf, n_dtype_dbuf * sizeof(k1::dtype), hipMemcpyHostToDevice));
+        gpuErrchk(hipMemcpy(dbuf_base, buf.data(), n_dtype_dbuf * sizeof(k1::dtype), hipMemcpyHostToDevice));
         gpuErrchk(hipDeviceSynchronize());
     }
 
+    
     // =============================================================================================
     // K2 SETUP
     // =============================================================================================
