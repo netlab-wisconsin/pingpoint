@@ -10,7 +10,7 @@
 namespace cg = cooperative_groups;
 
 #define PPNT_TBID_IN_XCD 0 // ppnt thread block id within xcd
-#define DEBUG_PPNT 0
+#define DEBUG_PPNT 1
 
 namespace ppnt {
 
@@ -77,7 +77,7 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
     asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID, 13, 3)" : "=r"(se_id));
     asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=r"(xcc_id));
 
-    if (tbid_in_xcd == PPNT_TBID_IN_XCD) {
+    if (tbid_in_xcd == PPNT_TBID_IN_XCD) { // TODO: bw will require multi tbs for profile
         /* Run profiling */
 
 #if DEBUG_PPNT

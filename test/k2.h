@@ -311,6 +311,11 @@ __device__ void k(
         float4 *ptr_in3 = reinterpret_cast<float4*>(k2_chunks3[chunk_idx]);
         float4 *ptr_in4 = reinterpret_cast<float4*>(k2_chunks4[chunk_idx]);
 
+        // Note (01/28/25) inserted for pingout
+        uint64_t start = 0;
+        start = __builtin_readcyclecounter();
+        asm volatile("s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t"); 
+
         asm volatile(
             "flat_load_dwordx4 %[OUT_D1],  %[IN_D1]\n\t"
             "flat_load_dwordx4 %[OUT_C1],  %[IN_C1]\n\t"
@@ -321,6 +326,19 @@ __device__ void k(
             : [IN_A1]"v" (&ptr_in1[thread_offset_in_chunk]), [IN_B1]"v" (&ptr_in2[thread_offset_in_chunk]), [IN_C1]"v" (&ptr_in3[thread_offset_in_chunk]), [IN_D1]"v" (&ptr_in4[thread_offset_in_chunk]) // note (01/18) not tid!
             : "memory"
         );
+
+        // Note (01/28/25) inserted for pingout
+        uint64_t end = 0;
+        asm volatile("s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t");
+        end = __builtin_readcyclecounter();
+        // TODO: need fix for k2_bpx > 1
+        // But #XCDs don't need to be considered here since ping defines a single xcd.
+        if (tid == 0) {
+#if DEBUG_K2_KERNEL
+            printf("k2 iter %ld tbid_in_xcd %d chunk_idx %zu: %lu cycles\n", i, tbid_in_xcd, chunk_idx, end - start);
+#endif
+            po_iterClk[i] = end - start;
+        }
 
         sink0 += reg_in1.x + reg_in2.x + reg_in3.x + reg_in4.x;
         sink1 += reg_in1.y + reg_in2.y + reg_in3.y + reg_in4.y;

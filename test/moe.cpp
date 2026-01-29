@@ -8,6 +8,8 @@
 #include <cmath>
 #include <iomanip>
 
+#include "../mem_bench/gpu-clock.cuh"
+
 #include "main.h"
 #include "ppnt.h"
 #include "moe.h"
@@ -23,6 +25,8 @@ using namespace std;
 
 int main(int argc, char **argv) {
 
+    unsigned int clock = getGPUClock();
+    
     // =============================================================================================
     // K1 SETUP
     // =============================================================================================
@@ -185,7 +189,7 @@ int main(int argc, char **argv) {
     // Minimal allocated #chunks across k2 datas (per HBM)
     // e.g, if 100/90/80/70 chunks allocated to hbm0 in datas 0/1/2/3, k2_d_chunks_per_hbm_count[0] = 70
     vector<size_t> k2_min_num_chunks_over_n_datas(HBM_NUM);
-    size_t k2_profiler_iters = -1;
+    size_t k2_profile_iters = -1;
     { /* k2 setup scope */
 
 #if (FAST)
@@ -288,9 +292,9 @@ int main(int argc, char **argv) {
 #endif
 
 #if (FAST)
-    k2_profiler_iters = 100000;
+    k2_profile_iters = 100000;
 #else
-    k2_profiler_iters = max(min(*min_element(k2_min_num_chunks_over_n_datas.begin(), k2_min_num_chunks_over_n_datas.end())), 100000);
+    k2_profile_iters = max(min(*min_element(k2_min_num_chunks_over_n_datas.begin(), k2_min_num_chunks_over_n_datas.end())), 100000);
 #endif
     }
 
@@ -326,31 +330,36 @@ int main(int argc, char **argv) {
         h_out.push_back(o);
     }
 
-    // {
-    //     // --- Add Bandwidth Plan ---
-    //     ppnt::PingSpec p;
-    //     p.ping_id         = (int)h_plan.size(); // auto increments
-    //     p.kind            = ppnt::PingKind::Bandwidth;
-    //     p.src_xcd         = 0;
-    //     p.dst_hbm         = 0;
-    //     p.iters           = k2_profiler_iters; 
-    //     p.data_bytes      = CHUNK_SIZE * k2_min_num_chunks_over_n_datas[p.dst_hbm]; // per data
-    //     p.data0           = k2_d_chunks_per_hbm[0] + k2_d_chunks_per_hbm_offset[0][p.dst_hbm];
-    //     p.data1           = k2_d_chunks_per_hbm[1] + k2_d_chunks_per_hbm_offset[1][p.dst_hbm];
-    //     p.data2           = k2_d_chunks_per_hbm[2] + k2_d_chunks_per_hbm_offset[2][p.dst_hbm];
-    //     p.data3           = k2_d_chunks_per_hbm[3] + k2_d_chunks_per_hbm_offset[3][p.dst_hbm];
-    //     h_plan.push_back(p);
+    {
+        // --- Add Bandwidth Plan ---
+        ppnt::PingSpec p;
+        p.ping_id         = (int)h_plan.size(); // auto increments
+        p.kind            = ppnt::PingKind::Bandwidth;
+        p.src_xcd         = 0;
+        p.dst_hbm         = 0;
+        p.iters           = k2_profile_iters; 
+        p.data_bytes      = CHUNK_SIZE * k2_min_num_chunks_over_n_datas[p.dst_hbm]; // per data
+        p.data0           = k2_d_chunks_per_hbm[0] + k2_d_chunks_per_hbm_offset[0][p.dst_hbm];
+        p.data1           = k2_d_chunks_per_hbm[1] + k2_d_chunks_per_hbm_offset[1][p.dst_hbm];
+        p.data2           = k2_d_chunks_per_hbm[2] + k2_d_chunks_per_hbm_offset[2][p.dst_hbm];
+        p.data3           = k2_d_chunks_per_hbm[3] + k2_d_chunks_per_hbm_offset[3][p.dst_hbm];
+        h_plan.push_back(p);
 
-    //     // -- Add Bandwidth Out ---
-    //     ppnt::PingOut o;
-    //     o.ping_id = p.ping_id;
-    //     o.kind    = p.kind;
-    //     o.src_xcd = p.src_xcd;
-    //     o.dst_hbm = p.dst_hbm;
-    //     o.iters   = p.iters;
-    //     gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * o.iters ));
-    //     h_out.push_back(o);
-    // }
+        // -- Add Bandwidth Out ---
+        ppnt::PingOut o;
+        o.ping_id = p.ping_id;
+        o.kind    = p.kind;
+        o.src_xcd = p.src_xcd;
+        o.dst_hbm = p.dst_hbm;
+        o.iters   = p.iters;
+#if 1
+        gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * o.iters ));
+#else
+        const int k2_bpx = 1; // TODO: set to a proper value that saturates bw
+        gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * o.iters * k2_bpx)); // each k2_bpx writes one clk value per-iteration
+#endif
+        h_out.push_back(o);
+    }
 
     // Copy plan/out to device
     size_t n_plan = h_plan.size();
@@ -443,7 +452,7 @@ int main(int argc, char **argv) {
 #if DEBUG_LEVEL >= 0
         cout << "[PPNT] " 
              << "Launching DISPATCH with "
-             << n_plan << " ping plans using "
+             << n_plan << " pings using "
              << "gridDim(" << gridD.x << "," << gridD.y << "," << gridD.z << ")" << " "
              << "blockDim(" << blockD.x << "," << blockD.y << "," << blockD.z << ")" << " "
              << "\n" << flush;
@@ -460,12 +469,26 @@ int main(int argc, char **argv) {
             ppnt::PingOut o;
             gpuErrchk(hipMemcpy(&o, &d_out[i], sizeof(ppnt::PingOut), hipMemcpyDeviceToHost));
 
+            // Copy per-iteration clock data to host
+            // TODO: this may also need to change when k2_bpx > 1
+            vector<uint64_t> h_iterClk(o.iters);
+            gpuErrchk(hipMemcpy(h_iterClk.data(), o.iterClk, sizeof(uint64_t) * o.iters, hipMemcpyDeviceToHost));
+
             // Compute average cycles per iteration
             uint64_t total_cycles = 0;
             for (size_t it = 0; it < o.iters; it++) {
-                total_cycles += o.iterClk[it];
+                total_cycles += h_iterClk[it];
             }
-            double avg_cycles = (double)total_cycles / (double)o.iters;
+            const double avg_cycles = (double)total_cycles / (double)o.iters;
+            const double avg_ns = (avg_cycles / (double)clock) * 1e3; // 1e3 as clock in MHz 
+
+            // Compute bandwidth for Bandwidth pings
+            string bw_str = "N/A"; // in GB/s
+            if (o.kind == ppnt::PingKind::Bandwidth) {
+                size_t iter_bytes = blockD.x * k2_n_datas * 16;
+                double bw_gbps = ((double)iter_bytes / (avg_ns)) ; // GB/s
+                bw_str = to_string(bw_gbps);
+            }
 
             // Report
             cout << "[PPNT] Ping id=" << i << " "
@@ -474,7 +497,8 @@ int main(int argc, char **argv) {
                  << "dst_hbm=" << o.dst_hbm << " "
                  << "iters=" << o.iters << " "
                  << fixed << setprecision(1)
-                 << "avg_cycles=" << avg_cycles << " "
+                 << "avg_ns=" << avg_ns << " "
+                 << "avg_GBps=" << bw_str << " "
                  << "\n" << flush;
         }
 
