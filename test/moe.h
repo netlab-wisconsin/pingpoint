@@ -39,6 +39,119 @@ static void fill_expert_ids(vector<int> &ids, int E)
         x = dist(rng) % E;
 }
 
+
+// =============================================================================================
+// ATTENTION KERNEL 1: QKV Projection (X -> QKV)
+// =============================================================================================
+struct AttnQKVArgs {
+    const float* __restrict__ X;    // [T, d]
+    const float* __restrict__ Wqkv; // [d, 3*d]
+    float* __restrict__ QKV;        // [T, 3*d]
+    int T, d;
+};
+
+struct AttnQKVTargetFn {
+    __device__ __forceinline__
+    void operator()(const AttnQKVArgs* __restrict__ a,
+                    int bid, int tid, int gridDimX, int blockDimX) const 
+    {
+        // 1. PPNT Grid Setup
+        int n_tbs_in_xcd = gridDimX / XCD_NUM;
+        int logical_bid = ppnt::physical_to_logical_bid_skip_one(bid, n_tbs_in_xcd, PPNT_TBID_IN_XCD);
+        int logical_grid_size = (n_tbs_in_xcd - 1) * XCD_NUM; 
+
+        // 2. Dimensions
+        int out_dim = 3 * a->d; // Q, K, V concatenated
+        int block_x = 32; 
+        int block_y = 32;
+        
+        int grid_dim_x = (out_dim + block_x - 1) / block_x;
+        int grid_dim_y = (a->T    + block_y - 1) / block_y;
+        int total_tiles = grid_dim_x * grid_dim_y;
+
+        // 3. Grid-Stride Loop
+        for (int curr_tile = logical_bid; curr_tile < total_tiles; curr_tile += logical_grid_size) {
+            
+            int by = curr_tile / grid_dim_x; // Token chunk
+            int bx = curr_tile % grid_dim_x; // Hidden chunk
+
+            int ty = tid / block_x; 
+            int tx = tid % block_x;
+
+            int j = bx * block_x + tx; // output dim (0 to 3d)
+            int t = by * block_y + ty; // token (0 to T)
+            
+            if (t >= a->T || j >= out_dim) continue;
+
+            // Perform GEMM: QKV[t, j] = Sum( X[t, k] * W[k, j] )
+            const float* x_row = a->X + (size_t)t * a->d;
+            float acc = 0.f;
+            
+            // Iterate over input dim 'd'
+            for (int k = 0; k < a->d; k++) {
+                // W is [d, 3d] row-major
+                acc += x_row[k] * a->Wqkv[(size_t)k * out_dim + j];
+            }
+            a->QKV[(size_t)t * out_dim + j] = acc;
+        }
+    }
+};
+
+
+// =============================================================================================
+// ATTENTION KERNEL 2: Output Projection (Ctx -> Out)
+// =============================================================================================
+// Simplified: Takes QKV buffer (treating it as 'Context') and projects back to d.
+struct AttnOutArgs {
+    const float* __restrict__ In;  // [T, 3*d] (Simulated Context)
+    const float* __restrict__ Wo;  // [3*d, d] (Simulated Output Weight to reduce dim)
+    float* __restrict__ Out;       // [T, d]
+    int T, d;
+};
+
+struct AttnOutTargetFn {
+    __device__ __forceinline__
+    void operator()(const AttnOutArgs* __restrict__ a,
+                    int bid, int tid, int gridDimX, int blockDimX) const 
+    {
+        int n_tbs_in_xcd = gridDimX / XCD_NUM;
+        int logical_bid = ppnt::physical_to_logical_bid_skip_one(bid, n_tbs_in_xcd, PPNT_TBID_IN_XCD);
+        int logical_grid_size = (n_tbs_in_xcd - 1) * XCD_NUM; 
+
+        int in_dim = 3 * a->d; 
+        int out_dim = a->d;
+        
+        int block_x = 32; 
+        int block_y = 32;
+        int grid_dim_x = (out_dim + block_x - 1) / block_x;
+        int grid_dim_y = (a->T    + block_y - 1) / block_y;
+        int total_tiles = grid_dim_x * grid_dim_y;
+
+        for (int curr_tile = logical_bid; curr_tile < total_tiles; curr_tile += logical_grid_size) {
+            
+            int by = curr_tile / grid_dim_x; 
+            int bx = curr_tile % grid_dim_x;
+
+            int ty = tid / block_x; 
+            int tx = tid % block_x;
+
+            int j = bx * block_x + tx; 
+            int t = by * block_y + ty; 
+            
+            if (t >= a->T || j >= out_dim) continue;
+
+            const float* in_row = a->In + (size_t)t * in_dim;
+            float acc = 0.f;
+            
+            // Project 3d -> d
+            for (int k = 0; k < in_dim; k++) {
+                acc += in_row[k] * a->Wo[(size_t)k * out_dim + j];
+            }
+            a->Out[(size_t)t * out_dim + j] = acc;
+        }
+    }
+};
+
 // =============================================================================================
 // DISPATCH
 // =============================================================================================

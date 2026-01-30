@@ -41,7 +41,7 @@ int main(int argc, char **argv) {
     // inside the k1 kernel.
     k1::dtype *k1_dummy_buf;
     size_t k1_profile_iters = -1;
-    { /* k1 setup scope */
+    { 
         k1::dtype *dbuf_base = nullptr;
         gpuErrchk(hipMallocManaged(&k1_dummy_buf, sizeof(k1::dtype)));
         k1_dummy_buf[0] = 0;
@@ -84,30 +84,17 @@ int main(int argc, char **argv) {
         vector<uint32_t> cl_home_xcd(n_cl_dbuf, (uint32_t)-1);
         vector<vector<uint32_t>> hbm_cls(HBM_NUM);
 
-        // Data home identification
         if (k1::home_identification(
-                dbuf_base,
-                n_dtype_dbuf,
-                n_cl_dbuf,
-                cl_size,
-                cl_bytes,
-                skip_factor,
-                dtype_home_xcd,
-                cl_home_xcd,
-                hbm_dtypes,
-                hbm_cls) == -1)
+                dbuf_base, n_dtype_dbuf, n_cl_dbuf, cl_size, cl_bytes, skip_factor,
+                dtype_home_xcd, cl_home_xcd, hbm_dtypes, hbm_cls) == -1)
             return -1;
 
 #if DEBUG_LEVEL >= 1
         for (int v = 0; v < HBM_NUM; v++) {
             string level = hbm_dtypes[v].size() * sizeof(k1::dtype) > L2_SIZE ? 
-                        (hbm_dtypes[v].size() * sizeof(k1::dtype) > LLC_SIZE ? "hbm" : "llc") 
-                        : "l2";
-            assert (level != "l2"); // K1 data should be at least in LLC
-            cout << "K1 pinned data: " << "hbm" << v << " "
-                << hbm_dtypes[v].size() * sizeof(k1::dtype) / (1024 * 1024) << "MB" << " "
-                << "at " << level << " "
-                << "\n" << flush;
+                        (hbm_dtypes[v].size() * sizeof(k1::dtype) > LLC_SIZE ? "hbm" : "llc") : "l2";
+            cout << "K1 pinned data: hbm" << v << " "
+                 << hbm_dtypes[v].size() * sizeof(k1::dtype) / (1024 * 1024) << "MB at " << level << "\n" << flush;
         }
 #endif
 
@@ -116,16 +103,14 @@ int main(int argc, char **argv) {
         // (Note 01/29/26) buf is fine to be host-side buffer since it's copied back to dbuf_base.
         // So, I changed it from hipMallocManaged to normal host vector allocation.
         vector<k1::dtype> buf(n_dtype_dbuf, 0);
-
         random_device rd;
         mt19937 g(rd());
+        
         for (int v = 0; v < HBM_NUM; v++) {
 
             // Choose LEN cache lines and shuffle them
             vector<uint32_t> seq(LEN);
-            for (size_t i = 0; i < LEN; i++) {
-                seq[i] = hbm_cls[v][i];
-            }
+            for (size_t i = 0; i < LEN; i++) seq[i] = hbm_cls[v][i];
             shuffle(seq.begin(), seq.end(), g);
 
 #if DEBUG_LEVEL >= 3
@@ -172,11 +157,8 @@ int main(int argc, char **argv) {
 #endif
                 }
             }
-
-            // Start pointer: lane 0 of the first cache line in seq[]
-            size_t start_elem = ((size_t)seq[0] * (size_t)cl_size + 0) * (size_t)skip_factor;
-            k1::dtype *dbuf_start = dbuf_base + start_elem;
-            k1_dbuf_start_ptrs_per_hbm[v] = dbuf_start;
+            size_t start_elem = ((size_t)seq[0] * cl_size + 0) * skip_factor;
+            k1_dbuf_start_ptrs_per_hbm[v] = dbuf_base + start_elem;
         }
 
         // Copy the full pointer table into device allocation.
@@ -199,17 +181,14 @@ int main(int argc, char **argv) {
     // e.g, if 100/90/80/70 chunks allocated to hbm0 in datas 0/1/2/3, k2_d_chunks_per_hbm_count[0] = 70
     vector<size_t> k2_min_num_chunks_over_n_datas(HBM_NUM);
     size_t k2_profile_iters = -1;
-    { /* k2 setup scope */
-
+    { 
 #if (FAST)
         const long long k2_n_pages = 512; // set 1024MB per input data, for faster debugging
 #else
         const long long k2_n_pages = (128 << 6); // set 16GB per input data
 #endif
-
         const int k2_page_size = PAGE_SIZE;
         const long long k2_data_size = (k2_n_pages * k2_page_size);
-
         const int k2_chunk_size = CHUNK_SIZE;
         const size_t k2_n_chunks = k2_data_size / k2_chunk_size;
 
@@ -219,18 +198,10 @@ int main(int argc, char **argv) {
             k2_d_data[i] = (char*)(((uintptr_t)k2_d_data[i] & ~(0x0FFF)) + 0x1000);
         }
 
-        // Per-chunk xcd identification.
         vector<vector<int>> k2_h_home(k2_n_datas, vector<int>(k2_n_chunks));
-        vector<vector<size_t>> k2_h_xcd_chunks_size(k2_n_datas, vector<size_t>(XCD_NUM, 0)); // count #chunks per-data per-xcd. init to 0
+        vector<vector<size_t>> k2_h_xcd_chunks_size(k2_n_datas, vector<size_t>(XCD_NUM, 0));
 
-        // Data home identification
-        if (k2::home_identification(
-                k2_d_data,
-                k2_data_size,
-                k2_n_chunks,
-                k2_n_datas,
-                k2_h_home,
-                k2_h_xcd_chunks_size) == -1)
+        if (k2::home_identification(k2_d_data, k2_data_size, k2_n_chunks, k2_n_datas, k2_h_home, k2_h_xcd_chunks_size) == -1)
             return -1;
 
         /* group per-xcd chunk pointers */
@@ -257,7 +228,7 @@ int main(int argc, char **argv) {
             for (int x = 0; x < XCD_NUM; x++) {
                 size_t _n_chunks = k2_h_xcd_chunks_size[i][x];
                 gpuErrchk(hipMemcpy(&k2_d_chunks_per_hbm[i][_offset], k2_xcd_chunks[i][x].data(), sizeof(uint64_t) * _n_chunks, hipMemcpyHostToDevice));
-                k2_h_offsets[i][x] = _offset; // Store in host vector
+                k2_h_offsets[i][x] = _offset; 
                 _offset += _n_chunks;
             }
         }
@@ -272,43 +243,15 @@ int main(int argc, char **argv) {
             }   
         }
 
-        // ensure minimal 8MB = 2 * l2_size per-xcd chunks in order to thrash l2
-        // conservative. since 2 xcds on same iod actually share the home data, another approach can be
-        // ensure minimal 8MB per-iod chunks 
-        const int min_n_chunks_per_xcd = ((4*2 * 1024 * 1024) / (k2_chunk_size)); // minimal #chunks >= 8MB
-        for (int x = 0; x < XCD_NUM; x++) {
-#if DEBUG_LEVEL >= 2
-            printf("xcd %d: min n_chunks %zu\n", x, k2_min_num_chunks_over_n_datas[x]);
-#endif
-            assert (k2_min_num_chunks_over_n_datas[x] * k2_n_datas >= min_n_chunks_per_xcd); // k2_min_num_chunks_over_n_datas[x] is minimal #chunks per xcd among all datas. 
-        }
-
-#if DEBUG_LEVEL >= 1
-        for (int x = 0; x < XCD_NUM; x++) {
-            size_t _size = (k2_h_xcd_chunks_size[0][x] + k2_h_xcd_chunks_size[1][x] + \
-                            k2_h_xcd_chunks_size[2][x] + k2_h_xcd_chunks_size[3][x]) * k2_chunk_size;
-
-            string level = _size > L2_SIZE ? 
-                        (_size > LLC_SIZE ? "hbm" : "llc") 
-                        : "l2";
-            assert (level != "l2"); // K2 data should be at least in LLC
-            cout << "K2 pinned data: " << "hbm" << x << " "
-                << _size / (1024 * 1024) << "MB" << " "
-                << "at " << level << " "
-                << "\n" << flush;
-        }
-#endif
 #if (FAST)
         k2_profile_iters = 100000;
 #else
-        k2_profile_iters = max(
-            *min_element(k2_min_num_chunks_over_n_datas.begin(), k2_min_num_chunks_over_n_datas.end()),
-            (size_t)100000);
+        k2_profile_iters = max(*min_element(k2_min_num_chunks_over_n_datas.begin(), k2_min_num_chunks_over_n_datas.end()), (size_t)100000);
 #endif
     }
 
     // =============================================================================================
-    // PPNT SETUP
+    // PPNT SETUP (Plan Generation)
     // =============================================================================================
     
     vector<ppnt::PingSpec> h_plan;
@@ -316,94 +259,67 @@ int main(int argc, char **argv) {
     ppnt::PingSpec *d_plan;
     ppnt::PingOut  *d_out;
 
-#if 0
-    { 
-        // --- Add Latency Plan ---
-        ppnt::PingSpec p;
-        p.ping_id         = (int)h_plan.size(); // auto increments
-        p.kind            = ppnt::PingKind::Latency;
-        p.src_xcd         = 0;
-        p.dst_hbm         = 0;
-        p.iters           = k1_profile_iters; 
-        // p.data_bytes      = --- IGNORE ---
-        p.data            = k1_dbuf_start_ptrs_per_hbm[p.dst_hbm];
-        p.dummy           = k1_dummy_buf; // to avoid compiler optimization
-        h_plan.push_back(p);
-
-        // -- Add Latency Out ---
-        ppnt::PingOut o;
-        o.ping_id = p.ping_id;
-        o.kind    = p.kind;
-        o.src_xcd = p.src_xcd;
-        o.dst_hbm = p.dst_hbm;
-        o.iters   = p.iters;
-        gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * o.iters ));
-        h_out.push_back(o);
-    }
-#endif
-
+    // --- Add Latency Plans ---
     for (int x = 0; x < XCD_NUM; x++) {
         for (int v = 0; v < HBM_NUM; v++) {
-            {/*scope*/ 
-                // --- Add Latency Plan ---
-                ppnt::PingSpec p;
-                p.ping_id         = (int)h_plan.size(); // auto increments
-                p.kind            = ppnt::PingKind::Latency;
-                p.src_xcd         = x;
-                p.dst_hbm         = v;
-                p.iters           = k1_profile_iters; 
-                // p.data_bytes      = --- IGNORE ---
-                p.data            = k1_dbuf_start_ptrs_per_hbm[p.dst_hbm];
-                p.dummy           = k1_dummy_buf; // to avoid compiler optimization
-                h_plan.push_back(p);
+            ppnt::PingSpec p;
+            p.ping_id = (int)h_plan.size();
+            p.kind    = ppnt::PingKind::Latency;
+            p.src_xcd = x;
+            p.dst_hbm = v;
+            p.iters   = k1_profile_iters; 
+            p.data    = k1_dbuf_start_ptrs_per_hbm[p.dst_hbm];
+            p.dummy   = k1_dummy_buf; 
+            h_plan.push_back(p);
 
-                // -- Add Latency Out ---
-                ppnt::PingOut o;
-                o.ping_id = p.ping_id;
-                o.kind    = p.kind;
-                o.src_xcd = p.src_xcd;
-                o.dst_hbm = p.dst_hbm;
-                o.iters   = p.iters;
-                gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * o.iters ));
-                h_out.push_back(o);
-            }/*scope*/
+            ppnt::PingOut o;
+            o.ping_id = p.ping_id;
+            o.kind    = p.kind;
+            o.src_xcd = p.src_xcd;
+            o.dst_hbm = p.dst_hbm;
+            o.iters   = p.iters;
+            gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * o.iters ));
+            h_out.push_back(o);
         }
     }
 
-//     {
-//         // --- Add Bandwidth Plan ---
-//         ppnt::PingSpec p;
-//         p.ping_id         = (int)h_plan.size(); // auto increments
-//         p.kind            = ppnt::PingKind::Bandwidth;
-//         p.src_xcd         = 0;
-//         p.dst_hbm         = 0;
-//         p.iters           = k2_profile_iters; 
-//         p.data_bytes      = CHUNK_SIZE * k2_min_num_chunks_over_n_datas[p.dst_hbm]; // per data
-//         p.data0           = k2_d_chunks_per_hbm[0] + k2_h_offsets[0][p.dst_hbm];
-//         p.data1           = k2_d_chunks_per_hbm[1] + k2_h_offsets[1][p.dst_hbm];
-//         p.data2           = k2_d_chunks_per_hbm[2] + k2_h_offsets[2][p.dst_hbm];
-//         p.data3           = k2_d_chunks_per_hbm[3] + k2_h_offsets[3][p.dst_hbm];
-//         // Note (01/28/25) This will definitely lead to OOB if k2_bpx > 1. Must modify the current implementation of 
-//         // having `XCD_NUM` as a substitute for real gridDim.x of the k2 profiler kernel
-//         // TODO: fix!!
-//         gpuErrchk(hipMalloc(&p.sink, sizeof(float) * (TARGET_BLOCKDIM_X * XCD_NUM))); 
-//         h_plan.push_back(p);
+    // --- Add Bandwidth Plans ---
+    for (int x = 0; x < XCD_NUM; x++) {
+        for (int v = 0; v < HBM_NUM; v++) {
+            ppnt::PingSpec p;
+            p.ping_id         = (int)h_plan.size(); // auto increments
+            p.kind            = ppnt::PingKind::Bandwidth;
+            p.src_xcd         = 0;
+            p.dst_hbm         = 0;
+            p.iters           = k2_profile_iters; 
+            p.data_bytes      = CHUNK_SIZE * k2_min_num_chunks_over_n_datas[p.dst_hbm]; // per data
+            p.data0           = k2_d_chunks_per_hbm[0] + k2_h_offsets[0][p.dst_hbm];
+            p.data1           = k2_d_chunks_per_hbm[1] + k2_h_offsets[1][p.dst_hbm];
+            p.data2           = k2_d_chunks_per_hbm[2] + k2_h_offsets[2][p.dst_hbm];
+            p.data3           = k2_d_chunks_per_hbm[3] + k2_h_offsets[3][p.dst_hbm];
+            // Note (01/28/25) This will definitely lead to OOB if k2_bpx > 1. Must modify the current implementation of 
+            // having `XCD_NUM` as a substitute for real gridDim.x of the k2 profiler kernel
+            // TODO: fix!!
+            gpuErrchk(hipMalloc(&p.sink, sizeof(float) * (TARGET_BLOCKDIM_X * XCD_NUM))); 
+            h_plan.push_back(p);
 
-//         // -- Add Bandwidth Out ---
-//         ppnt::PingOut o;
-//         o.ping_id = p.ping_id;
-//         o.kind    = p.kind;
-//         o.src_xcd = p.src_xcd;
-//         o.dst_hbm = p.dst_hbm;
-//         o.iters   = p.iters;
-// #if 1
-//         gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * o.iters ));
-// #else
-//         const int k2_bpx = 1; // TODO: set to a proper value that saturates bw
-//         gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * o.iters * k2_bpx)); // each k2_bpx writes one clk value per-iteration
-// #endif
-//         h_out.push_back(o);
-//     }
+            // -- Add Bandwidth Out ---
+            ppnt::PingOut o;
+            o.ping_id = p.ping_id;
+            o.kind    = p.kind;
+            o.src_xcd = p.src_xcd;
+            o.dst_hbm = p.dst_hbm;
+            o.iters   = p.iters;
+    #if 1
+            gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * o.iters ));
+    #else
+            const int k2_bpx = 1; // TODO: set to a proper value that saturates bw
+            gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * o.iters * k2_bpx)); // each k2_bpx writes one clk value per-iteration
+    #endif
+            h_out.push_back(o);
+
+        }
+    }
 
     // Copy plan/out to device
     size_t n_plan = h_plan.size();
@@ -414,68 +330,170 @@ int main(int argc, char **argv) {
         gpuErrchk(hipMemcpy(d_out,  h_out.data(),  sizeof(ppnt::PingOut)  * n_plan, hipMemcpyHostToDevice));
     }
 
+
     // =============================================================================================
     // MoE SETUP
     // =============================================================================================
 
-    // num tokens set intentionally for full occupancy (excluding the profiling TBs)
+    // 1. Dimensions
     const int T = (argc > 1) ? atoi(argv[1]) : TARGET_BLOCKDIM_X * (CU_NUM-1) * XCD_NUM;
-    const int d = (argc > 2) ? atoi(argv[2]) : 2048; // model dim
-    const int E = (argc > 3) ? atoi(argv[3]) : 8;    // experts
+    const int d = (argc > 2) ? atoi(argv[2]) : 2048; 
+    const int E = (argc > 3) ? atoi(argv[3]) : 8;    
     const int hidden = 4 * d;
-
 #if IMBALANCED_DISTRIBUTION
-    const int cap = (T + 64 - 1) / 64; // an expert can take all tokens in the worst case
+    const int cap = ((T + 64 - 1) / 64) * 64;
 #else
-    const int cap = (T + E - 1) / E + 64; // add headroom to avoid overflow
+    const int cap = (T + E - 1) / E + 64; 
 #endif
 
 #if DEBUG_LEVEL >= 0
-    printf("T=%d d=%d hidden=%d E=%d cap=%d\n", T, d, hidden, E, cap);
+    printf("[MoE] Setup: T=%d d=%d hidden=%d E=%d cap=%d\n", T, d, hidden, E, cap);
 #endif
 
     hipStream_t stream;
     gpuErrchk(hipStreamCreate(&stream));
 
-    // Host buffers
-    vector<float> h_X(T * d);
-    vector<int> h_eid(T);
-    fill_random(h_X);
-    fill_expert_ids(h_eid, E);
+    // 2. Cooperative Grid Configuration
+    // Calculate once, use for all persistent kernels (Attn, FFN, Gather)
+    int physical_grid_size;
+    {
+        const int num_sms = CU_NUM * XCD_NUM;
+        const int max_blocks_per_sm = 2;
+        const int target_physical_blocks = max_blocks_per_sm * num_sms;
+        
+        // Round down to nearest multiple of XCD_NUM
+        physical_grid_size = (target_physical_blocks / XCD_NUM) * XCD_NUM;
+        if (physical_grid_size < XCD_NUM) physical_grid_size = XCD_NUM;
+        
+        int logical_blocks = physical_grid_size - XCD_NUM;
+
+#if DEBUG_LEVEL >= 1
+        cout << "[PPNT] Cooperative Grid: " << physical_grid_size 
+             << " physical blocks (" << logical_blocks << " logical workers)\n" << flush;
+#endif
+    }
+
+    // 3. Model Weights (Allocation & Initialization)
+    float *d_Wqkv = nullptr, *d_Wo = nullptr, *d_W1 = nullptr, *d_W2 = nullptr;
+    {
+        // Allocation
+        gpuErrchk(hipMalloc(&d_Wqkv, sizeof(float) * d * (3*d)));
+        gpuErrchk(hipMalloc(&d_Wo,   sizeof(float) * (3*d) * d));
+        gpuErrchk(hipMalloc(&d_W1,   sizeof(float) * (size_t)E * d * hidden));
+        gpuErrchk(hipMalloc(&d_W2,   sizeof(float) * (size_t)E * hidden * d));
+
+        // Initialization (Scoped to free host memory immediately)
+        // Attention weights zeroed for simplicity
+        gpuErrchk(hipMemsetAsync(d_Wqkv, 0, sizeof(float) * d * (3*d), stream));
+        gpuErrchk(hipMemsetAsync(d_Wo,   0, sizeof(float) * (3*d) * d, stream));
+
+        // FFN weights random
+        std::vector<float> h_W1((size_t)E * d * hidden);
+        std::vector<float> h_W2((size_t)E * hidden * d);
+        fill_random(h_W1);
+        fill_random(h_W2);
+        gpuErrchk(hipMemcpyAsync(d_W1, h_W1.data(), sizeof(float) * h_W1.size(), hipMemcpyHostToDevice, stream));
+        gpuErrchk(hipMemcpyAsync(d_W2, h_W2.data(), sizeof(float) * h_W2.size(), hipMemcpyHostToDevice, stream));
+    }
+
+    // 4. Model Inputs (Allocation & Initialization)
+    float *d_X = nullptr;
+    int   *d_eid = nullptr;
+    {
+        gpuErrchk(hipMalloc(&d_X,   sizeof(float) * (size_t)T * d));
+        gpuErrchk(hipMalloc(&d_eid, sizeof(int)   * (size_t)T));
+
+        vector<float> h_X(T * d);
+        vector<int> h_eid(T);
+        fill_random(h_X);
+        fill_expert_ids(h_eid, E);
+
 #if DEBUG_LEVEL >= 0
-    // print distribution
-    vector<int> counts(E, 0);
-    for (auto x : h_eid)
-        counts[x]++;
-    cout << "Expert token distribution: ";
-    for (int e = 0; e < E; e++) cout << counts[e] << " ";
-    cout << "\n" << flush;
+        vector<int> counts(E, 0);
+        for (auto x : h_eid) counts[x]++;
+        cout << "[MoE] Token Dist: ";
+        for (int e = 0; e < E; e++) cout << counts[e] << " ";
+        cout << "\n" << flush;
 #endif
 
-    // Device buffers
-    float *d_X = nullptr, *d_Xexp = nullptr, *d_Y = nullptr;
-    int *d_eid = nullptr, *d_pos = nullptr, *d_cnt = nullptr;
-    gpuErrchk(hipMalloc(&d_X, sizeof(float) * h_X.size()));
-    gpuErrchk(hipMalloc(&d_eid, sizeof(int) * h_eid.size()));
-    gpuErrchk(hipMalloc(&d_Xexp, sizeof(float) * (size_t)E * cap * d));
-    gpuErrchk(hipMalloc(&d_pos, sizeof(int) * (size_t)T));
-    gpuErrchk(hipMalloc(&d_cnt, sizeof(int) * (size_t)E));
-    gpuErrchk(hipMalloc(&d_Y, sizeof(float) * (size_t)T * d));
+        gpuErrchk(hipMemcpyAsync(d_X,   h_X.data(),   sizeof(float) * h_X.size(),   hipMemcpyHostToDevice, stream));
+        gpuErrchk(hipMemcpyAsync(d_eid, h_eid.data(), sizeof(int)   * h_eid.size(), hipMemcpyHostToDevice, stream));
+    }
 
-    gpuErrchk(hipMemcpyAsync(d_X, h_X.data(), sizeof(float) * h_X.size(), hipMemcpyHostToDevice, stream));
-    gpuErrchk(hipMemcpyAsync(d_eid, h_eid.data(), sizeof(int) * h_eid.size(), hipMemcpyHostToDevice, stream));
+    // 5. Intermediate Buffers & Output
+    // Attention buffers
+    float *d_QKV = nullptr, *d_AttnOut = nullptr;
+    gpuErrchk(hipMalloc(&d_QKV,     sizeof(float) * (size_t)T * (3*d)));
+    gpuErrchk(hipMalloc(&d_AttnOut, sizeof(float) * (size_t)T * d));
+
+    // MoE buffers
+    float *d_Xexp = nullptr, *d_Tmp = nullptr, *d_Yexp = nullptr, *d_Y = nullptr;
+    int   *d_pos = nullptr, *d_cnt = nullptr;
+    
+    gpuErrchk(hipMalloc(&d_pos,  sizeof(int)   * (size_t)T));
+    gpuErrchk(hipMalloc(&d_cnt,  sizeof(int)   * (size_t)E));
+    gpuErrchk(hipMalloc(&d_Xexp, sizeof(float) * (size_t)E * cap * d));
+    gpuErrchk(hipMalloc(&d_Tmp,  sizeof(float) * (size_t)E * cap * hidden));
+    gpuErrchk(hipMalloc(&d_Yexp, sizeof(float) * (size_t)E * cap * d));
+    gpuErrchk(hipMalloc(&d_Y,    sizeof(float) * (size_t)T * d));
+
+    // Reset counters
     gpuErrchk(hipMemsetAsync(d_cnt, 0, sizeof(int) * (size_t)E, stream));
 
+
+    // =============================================================================================
+    // PPNT EXECUTION WITH MoE KERNELS
+    // =============================================================================================
+
+    // 1. ATTENTION LAYER: QKV Projection (X -> QKV)
     { 
-        // =========================================================================================
-        // PPNT
-        // =========================================================================================
+#if DEBUG_LEVEL >= 1
+        cout << "\n\nATTENTION1 (QKV)" << "\n" << flush;
+#endif
+        AttnQKVArgs h_args = {d_X, d_Wqkv, d_QKV, T, d};
+        AttnQKVArgs* d_args = nullptr;
+        gpuErrchk(hipMalloc(&d_args, sizeof(AttnQKVArgs)));
+        gpuErrchk(hipMemcpyAsync(d_args, &h_args, sizeof(AttnQKVArgs), hipMemcpyHostToDevice, stream));
 
-        // Dispatch
-        // X[T,d] -> Xexp[E,cap,d]
+        AttnQKVTargetFn fn{};
+        void* kargs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&n_plan, (void*)&d_out };
 
-        // args setup
-        DispatchArgs h_args = {d_X, d_eid, d_Xexp, d_pos, d_cnt, T, d, E, cap};
+        gpuErrchk(hipLaunchCooperativeKernel(
+            (void*)ppnt::fused_kernel<AttnQKVTargetFn, AttnQKVArgs>,
+            dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
+        gpuErrchk(hipStreamSynchronize(stream));
+        ppnt::parse_pingouts(d_out, n_plan, TARGET_BLOCKDIM_X, clock);
+    }
+
+    // 2. ATTENTION LAYER: Output Projection (QKV -> AttnOut)
+    { 
+#if DEBUG_LEVEL >= 1
+        cout << "\n\nATTENTION2 (Out)" << "\n" << flush;
+#endif
+        AttnOutArgs h_args = {d_QKV, d_Wo, d_AttnOut, T, d};
+        AttnOutArgs* d_args = nullptr;
+        gpuErrchk(hipMalloc(&d_args, sizeof(AttnOutArgs)));
+        gpuErrchk(hipMemcpyAsync(d_args, &h_args, sizeof(AttnOutArgs), hipMemcpyHostToDevice, stream));
+
+        AttnOutTargetFn fn{};
+        void* kargs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&n_plan, (void*)&d_out };
+
+        gpuErrchk(hipLaunchCooperativeKernel(
+            (void*)ppnt::fused_kernel<AttnOutTargetFn, AttnOutArgs>,
+            dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
+        gpuErrchk(hipStreamSynchronize(stream));
+        ppnt::parse_pingouts(d_out, n_plan, TARGET_BLOCKDIM_X, clock);
+    }
+
+    // 3. MOE: Dispatch (AttnOut -> Xexp)
+    { 
+#if DEBUG_LEVEL >= 1
+        cout << "\n\nDISPATCH" << "\n" << flush;
+#endif
+        // Explicitly defining input for clarity
+        float* d_moe_input = d_AttnOut; 
+
+        DispatchArgs h_args = {d_moe_input, d_eid, d_Xexp, d_pos, d_cnt, T, d, E, cap};
         DispatchArgs* d_args = nullptr;
         gpuErrchk(hipMalloc(&d_args, sizeof(DispatchArgs)));
         gpuErrchk(hipMemcpyAsync(d_args, &h_args, sizeof(DispatchArgs), hipMemcpyHostToDevice, stream));
@@ -483,86 +501,26 @@ int main(int argc, char **argv) {
         DispatchTargetFn fn{};
         void* kernelArgs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&n_plan, (void*)&d_out };
 
-        // Take max of blockDims of target and profile
+        // Note: Dispatch uses a calculated grid based on T, plus 1 profile block per XCD
         dim3 target_blockD(TARGET_BLOCKDIM_X);
         dim3 profile_blockD(1024);
         dim3 blockD(max(target_blockD.x, profile_blockD.x));
-
-        // Add gridDims of target and profile
-        dim3 target_gridD((T + target_blockD.x - 1) / target_blockD.x); // #tokens/tpb
-        dim3 profile_gridD(XCD_NUM); // 1 profile TB per XCD
+        dim3 target_gridD((T + target_blockD.x - 1) / target_blockD.x); 
+        dim3 profile_gridD(XCD_NUM); 
         dim3 gridD(target_gridD.x + profile_gridD.x);
-
-#if DEBUG_LEVEL >= 1
-        cout << "[PPNT] " 
-             << "Launching DISPATCH with "
-             << n_plan << " pings"
-             << "\n" << flush;
-#endif
 
         gpuErrchk(hipLaunchCooperativeKernel(
             (void*)ppnt::fused_kernel<DispatchTargetFn, DispatchArgs>,
-            dim3(gridD), dim3(blockD),
-            kernelArgs, 0, stream));
+            dim3(gridD), dim3(blockD), kernelArgs, 0, stream));
         gpuErrchk(hipStreamSynchronize(stream));
         ppnt::parse_pingouts(d_out, n_plan, TARGET_BLOCKDIM_X, clock);
+    }
 
-    } /* ppnt */
-
-
-    // =============================================================================================
-    // FFN SETUP & EXECUTION (GEMM1 -> ReLU -> GEMM2)
-    // =============================================================================================
-
-    // Cooperative Kernel Grid Configuration
-    const int num_sms = CU_NUM * XCD_NUM;;
-    const int max_blocks_per_sm = 2;
-    const int threads_per_block = 1024; 
-    const int target_physical_blocks = max_blocks_per_sm * num_sms;
-    
-    // PPNT Requirement: Grid size must be divisible by XCD_NUM to ensure even distribution
-    // We round DOWN to the nearest multiple of XCD_NUM to stay within resident limits.
-    int physical_grid_size = (target_physical_blocks / XCD_NUM) * XCD_NUM;
-    
-    // Safety clamp (optional, prevents extremely small grids on weird hardware)
-    if (physical_grid_size < XCD_NUM) physical_grid_size = XCD_NUM;
-
-    // The number of "working" blocks will be physical_grid_size - XCD_NUM
-    int logical_blocks = physical_grid_size - XCD_NUM;
-
+    // 4. MOE: FFN1 (Xexp -> Tmp)
+    { 
 #if DEBUG_LEVEL >= 1
-    cout << "[PPNT] Cooperative Grid Config:\n"
-         << "       Max Blocks/SM: " << max_blocks_per_sm << "\n"
-         << "       Total SMs: " << num_sms << "\n"
-         << "       Physical Grid: " << physical_grid_size << " blocks\n"
-         << "       Logical Workers: " << logical_blocks << " blocks\n" << flush;
+        cout << "FFN1" << "\n" << flush;
 #endif
-
-    // Allocations
-    std::vector<float> h_W1((size_t)E * d * hidden);
-    std::vector<float> h_W2((size_t)E * hidden * d);
-    fill_random(h_W1);
-    fill_random(h_W2);
-
-    float *d_W1=nullptr, *d_W2=nullptr, *d_Tmp=nullptr, *d_Yexp=nullptr;
-    gpuErrchk(hipMalloc(&d_W1, sizeof(float) * h_W1.size()));
-    gpuErrchk(hipMalloc(&d_W2, sizeof(float) * h_W2.size()));
-    gpuErrchk(hipMemcpyAsync(d_W1, h_W1.data(), sizeof(float) * h_W1.size(), hipMemcpyHostToDevice, stream));
-    gpuErrchk(hipMemcpyAsync(d_W2, h_W2.data(), sizeof(float) * h_W2.size(), hipMemcpyHostToDevice, stream));
-
-    // Tmp: [E*cap, hidden], holds output of GEMM1 (Up-proj)
-    // Yexp: [E*cap, d], holds output of GEMM2 (Down-proj)
-    gpuErrchk(hipMalloc(&d_Tmp,  sizeof(float) * (size_t)E * cap * hidden));
-    gpuErrchk(hipMalloc(&d_Yexp, sizeof(float) * (size_t)E * cap * d));
-
-    {
-        // =========================================================================================
-        // PPNT
-        // =========================================================================================
-        
-        // GEMM1
-        // Xexp[E,cap,d] * W1[E,d,hidden] -> Tmp[E,cap,hidden]
-
         Gemm1Args h_args = {d_Xexp, d_W1, d_Tmp, d_cnt, E, cap, d, hidden};
         Gemm1Args* d_args = nullptr;
         gpuErrchk(hipMalloc(&d_args, sizeof(Gemm1Args)));
@@ -571,13 +529,6 @@ int main(int argc, char **argv) {
         Gemm1TargetFn fn{};
         void* kargs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&n_plan, (void*)&d_out };
 
-#if DEBUG_LEVEL >= 1
-        cout << "[PPNT] " 
-             << "Launching GEMM1 with "
-             << n_plan << " pings"
-             << "\n" << flush;
-#endif
-
         gpuErrchk(hipLaunchCooperativeKernel(
             (void*)ppnt::fused_kernel<Gemm1TargetFn, Gemm1Args>,
             dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
@@ -585,14 +536,11 @@ int main(int argc, char **argv) {
         ppnt::parse_pingouts(d_out, n_plan, TARGET_BLOCKDIM_X, clock);
     }
 
-    {
-        // =========================================================================================
-        // PPNT
-        // =========================================================================================
-        
-        // ReLU
-        // Tmp[E,cap,hidden] -> Tmp[E,cap,hidden]
-
+    // 5. MOE: ReLU (Tmp -> Tmp)
+    { 
+#if DEBUG_LEVEL >= 1
+        cout << "\n\nRELU" << "\n" << flush;
+#endif
         ReluArgs h_args = {d_Tmp, d_cnt, E, cap, hidden};
         ReluArgs* d_args = nullptr;
         gpuErrchk(hipMalloc(&d_args, sizeof(ReluArgs)));
@@ -601,13 +549,6 @@ int main(int argc, char **argv) {
         ReluTargetFn fn{};
         void* kargs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&n_plan, (void*)&d_out };
 
-#if DEBUG_LEVEL >= 1
-        cout << "[PPNT] " 
-             << "Launching ReLU with "
-             << n_plan << " pings"
-             << "\n" << flush;
-#endif
-
         gpuErrchk(hipLaunchCooperativeKernel(
             (void*)ppnt::fused_kernel<ReluTargetFn, ReluArgs>,
             dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
@@ -615,14 +556,11 @@ int main(int argc, char **argv) {
         ppnt::parse_pingouts(d_out, n_plan, TARGET_BLOCKDIM_X, clock);
     }
 
-    {
-        // =========================================================================================
-        // PPNT
-        // =========================================================================================
-        
-        // GEMM2
-        // Tmp[E,cap,hidden] * W2[E,hidden,d] -> Yexp[E,cap,d]
-
+    // 6. MOE: FFN2 (Tmp -> Yexp)
+    { 
+#if DEBUG_LEVEL >= 1
+        cout << "FFN2" << "\n" << flush;
+#endif
         Gemm2Args h_args = {d_Tmp, d_W2, d_Yexp, d_cnt, E, cap, d, hidden};
         Gemm2Args* d_args = nullptr;
         gpuErrchk(hipMalloc(&d_args, sizeof(Gemm2Args)));
@@ -631,13 +569,6 @@ int main(int argc, char **argv) {
         Gemm2TargetFn fn{};
         void* kargs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&n_plan, (void*)&d_out };
 
-#if DEBUG_LEVEL >= 1
-        cout << "[PPNT] " 
-             << "Launching GEMM2 with "
-             << n_plan << " pings"
-             << "\n" << flush;
-#endif
-
         gpuErrchk(hipLaunchCooperativeKernel(
             (void*)ppnt::fused_kernel<Gemm2TargetFn, Gemm2Args>,
             dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
@@ -645,14 +576,11 @@ int main(int argc, char **argv) {
         ppnt::parse_pingouts(d_out, n_plan, TARGET_BLOCKDIM_X, clock);
     }
 
-    {
-        // =========================================================================================
-        // PPNT
-        // =========================================================================================
-        
-        // Gather
-        // Yexp[E,cap,d] -> Y[T,d]
-
+    // 7. MOE: Gather (Yexp -> Y)
+    { 
+#if DEBUG_LEVEL >= 1
+        cout << "\n\nGATHER" << "\n" << flush;
+#endif
         GatherArgs h_args = {d_Yexp, d_pos, d_Y, T, d, cap};
         GatherArgs* d_args = nullptr;
         gpuErrchk(hipMalloc(&d_args, sizeof(GatherArgs)));
@@ -661,21 +589,13 @@ int main(int argc, char **argv) {
         GatherTargetFn fn{};
         void* kargs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&n_plan, (void*)&d_out };
 
-#if DEBUG_LEVEL >= 1
-        cout << "[PPNT] " 
-             << "Launching GATHER with "
-             << n_plan << " pings"
-             << "\n" << flush;
-#endif
-
         gpuErrchk(hipLaunchCooperativeKernel(
-                    (void*)ppnt::fused_kernel<GatherTargetFn, GatherArgs>,
-                    dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
+            (void*)ppnt::fused_kernel<GatherTargetFn, GatherArgs>,
+            dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
         gpuErrchk(hipStreamSynchronize(stream));
         ppnt::parse_pingouts(d_out, n_plan, TARGET_BLOCKDIM_X, clock);
     }
 
-    // Cleanup later: d_W1, d_W2, d_Tmp, d_Yexp
+    // Cleanup resources here if needed (omitted for brevity)
     return 0;
 }
-
