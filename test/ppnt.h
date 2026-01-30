@@ -156,12 +156,6 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
             grid.sync();
             
             target_fn(targs, bid, tid, gridDim.x, blockDim.x);
-            // target_fn(targs, 
-            //           physical_to_logical_bid_skip_one(bid, n_tbs_in_xcd, PPNT_TBID_IN_XCD), 
-            //           tid, 
-            //           gridDim.x - XCD_NUM, // adjusted gridDim.x
-            //           blockDim.x);
-
         }
 #endif
     }
