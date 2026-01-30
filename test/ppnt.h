@@ -94,7 +94,7 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
             grid.sync();
 
             const PingSpec& spec = plan[i];
-#if DEBUG_PPNT_LEVEL >= 0
+#if DEBUG_PPNT_LEVEL >= 1
             if (bid == 0 && tid == 0) {
                 printf("spec[%d]: ping_id=%d, kind=%d, src_xcd=%d, dst_hbm=%d, iters=%zu, data_bytes=%zu, data0=%p\n", \
                     i, spec.ping_id, (int)spec.kind, spec.src_xcd, spec.dst_hbm, spec.iters, spec.data_bytes, spec.data0);

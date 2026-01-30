@@ -19,7 +19,7 @@
 #include "k1.h"
 #include "k2.h"
 
-#define DEBUG_LEVEL 1 // 0: PPNT, 1: Memalloc, 2+: Misc
+#define DEBUG_LEVEL 1 // 0: MoE, 1: PPNT, 2+: Misc
 #define FAST 1 // set for faster debugging, set 0 for actual measurement
 
 using namespace std;
@@ -316,6 +316,7 @@ int main(int argc, char **argv) {
     ppnt::PingSpec *d_plan;
     ppnt::PingOut  *d_out;
 
+#if 0
     { 
         // --- Add Latency Plan ---
         ppnt::PingSpec p;
@@ -339,58 +340,36 @@ int main(int argc, char **argv) {
         gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * o.iters ));
         h_out.push_back(o);
     }
+#endif
 
-    { 
-        // --- Add Latency Plan ---
-        ppnt::PingSpec p;
-        p.ping_id         = (int)h_plan.size(); // auto increments
-        p.kind            = ppnt::PingKind::Latency;
-        p.src_xcd         = 0;
-        p.dst_hbm         = 2;
-        p.iters           = k1_profile_iters; 
-        // p.data_bytes      = --- IGNORE ---
-        p.data            = k1_dbuf_start_ptrs_per_hbm[p.dst_hbm];
-        p.dummy           = k1_dummy_buf; // to avoid compiler optimization
-        h_plan.push_back(p);
+    for (int x = 0; x < XCD_NUM; x++) {
+        for (int v = 0; v < HBM_NUM; v++) {
+            {/*scope*/ 
+                // --- Add Latency Plan ---
+                ppnt::PingSpec p;
+                p.ping_id         = (int)h_plan.size(); // auto increments
+                p.kind            = ppnt::PingKind::Latency;
+                p.src_xcd         = x;
+                p.dst_hbm         = v;
+                p.iters           = k1_profile_iters; 
+                // p.data_bytes      = --- IGNORE ---
+                p.data            = k1_dbuf_start_ptrs_per_hbm[p.dst_hbm];
+                p.dummy           = k1_dummy_buf; // to avoid compiler optimization
+                h_plan.push_back(p);
 
-        // -- Add Latency Out ---
-        ppnt::PingOut o;
-        o.ping_id = p.ping_id;
-        o.kind    = p.kind;
-        o.src_xcd = p.src_xcd;
-        o.dst_hbm = p.dst_hbm;
-        o.iters   = p.iters;
-        gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * o.iters ));
-        h_out.push_back(o);
+                // -- Add Latency Out ---
+                ppnt::PingOut o;
+                o.ping_id = p.ping_id;
+                o.kind    = p.kind;
+                o.src_xcd = p.src_xcd;
+                o.dst_hbm = p.dst_hbm;
+                o.iters   = p.iters;
+                gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * o.iters ));
+                h_out.push_back(o);
+            }/*scope*/
+        }
     }
 
-    // for (int x = 0; x < XCD_NUM; x++) {
-    //     for (int v = 0; v < HBM_NUM; v++) {
-    //         {/*scope*/ 
-    //             // --- Add Latency Plan ---
-    //             ppnt::PingSpec p;
-    //             p.ping_id         = (int)h_plan.size(); // auto increments
-    //             p.kind            = ppnt::PingKind::Latency;
-    //             p.src_xcd         = x;
-    //             p.dst_hbm         = v;
-    //             p.iters           = k1_profile_iters; 
-    //             // p.data_bytes      = --- IGNORE ---
-    //             p.data            = k1_dbuf_start_ptrs_per_hbm[p.dst_hbm];
-    //             p.dummy           = k1_dummy_buf; // to avoid compiler optimization
-    //             h_plan.push_back(p);
-
-    //             // -- Add Latency Out ---
-    //             ppnt::PingOut o;
-    //             o.ping_id = p.ping_id;
-    //             o.kind    = p.kind;
-    //             o.src_xcd = p.src_xcd;
-    //             o.dst_hbm = p.dst_hbm;
-    //             o.iters   = p.iters;
-    //             gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * o.iters ));
-    //             h_out.push_back(o);
-    //         }/*scope*/
-    //     }
-    // }
 //     {
 //         // --- Add Bandwidth Plan ---
 //         ppnt::PingSpec p;
@@ -451,7 +430,7 @@ int main(int argc, char **argv) {
     const int cap = (T + E - 1) / E + 64; // add headroom to avoid overflow
 #endif
 
-#if DEBUG_LEVEL >= 1
+#if DEBUG_LEVEL >= 0
     printf("T=%d d=%d hidden=%d E=%d cap=%d\n", T, d, hidden, E, cap);
 #endif
 
@@ -463,7 +442,7 @@ int main(int argc, char **argv) {
     vector<int> h_eid(T);
     fill_random(h_X);
     fill_expert_ids(h_eid, E);
-#if DEBUG_LEVEL >= 2
+#if DEBUG_LEVEL >= 0
     // print distribution
     vector<int> counts(E, 0);
     for (auto x : h_eid)
@@ -514,7 +493,7 @@ int main(int argc, char **argv) {
         dim3 profile_gridD(XCD_NUM); // 1 profile TB per XCD
         dim3 gridD(target_gridD.x + profile_gridD.x);
 
-#if DEBUG_LEVEL >= 0
+#if DEBUG_LEVEL >= 1
         cout << "[PPNT] " 
              << "Launching DISPATCH with "
              << n_plan << " pings using "
@@ -560,15 +539,15 @@ int main(int argc, char **argv) {
             }
 
             // Report
-            cout << "[PPNT] Ping id=" << i << " "
+            cout << "[PPNT] Ping id=" << setw(2) << i << " "
                  << "kind=" << ((o.kind == ppnt::PingKind::Latency) ? "Latency" : "Bandwidth") << " "
-                 << "src_xcd=" << o.src_xcd << " "
-                 << "dst_hbm=" << o.dst_hbm << " "
-                 << "iters=" << o.iters << " "
+                 << "src_xcd=" << setw(1) << o.src_xcd << " "
+                 << "dst_hbm=" << setw(1) << o.dst_hbm << " "
+                 << "iters=" << setw(8) << o.iters << " "
                  << fixed << setprecision(1)
-                 << "mean_ns=" << ns_mean << " "
-                 << "p90_ns=" << ns_max << " "
-                 << "GBps=" << bw_str << " "
+                 << "mean_ns=" << setw(3) << ns_mean << " "
+                 << "p90_ns=" << setw(3) << ns_max << " "
+                 << "GBps=" << setw(3) << bw_str << " "
                  << "\n" << flush;
         }
 
