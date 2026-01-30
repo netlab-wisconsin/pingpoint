@@ -496,108 +496,186 @@ int main(int argc, char **argv) {
 #if DEBUG_LEVEL >= 1
         cout << "[PPNT] " 
              << "Launching DISPATCH with "
-             << n_plan << " pings using "
-             << "gridDim(" << gridD.x << "," << gridD.y << "," << gridD.z << ")" << " "
-             << "blockDim(" << blockD.x << "," << blockD.y << "," << blockD.z << ")" << " "
+             << n_plan << " pings"
              << "\n" << flush;
 #endif
+
         gpuErrchk(hipLaunchCooperativeKernel(
             (void*)ppnt::fused_kernel<DispatchTargetFn, DispatchArgs>,
             dim3(gridD), dim3(blockD),
             kernelArgs, 0, stream));
         gpuErrchk(hipStreamSynchronize(stream));
-
-        // Check PingOut results
-        // TODO: temporarily done here, move to end of main later on.
-        for (size_t i = 0; i < n_plan; i++) {
-            ppnt::PingOut o;
-            gpuErrchk(hipMemcpy(&o, &d_out[i], sizeof(ppnt::PingOut), hipMemcpyDeviceToHost));
-
-            // Copy per-iteration clock data to host
-            // TODO: this may also need to change when k2_bpx > 1
-            vector<uint64_t> h_iterClk(o.iters);
-            gpuErrchk(hipMemcpy(h_iterClk.data(), o.iterClk, sizeof(uint64_t) * o.iters, hipMemcpyDeviceToHost));
-
-            // Compute average cycles per iteration
-            MeasurementSeries cycles;
-            for (size_t it = 0; it < o.iters; it++) {
-                cycles.add(h_iterClk[it]);
-#if DEBUG_LEVEL >= 3
-                cout << "[PPNT] Ping id=" << i << " iter=" << it << " cycles=" << h_iterClk[it] << "\n" << flush;
-#endif
-            }
-            // 1e3 as clock in MHz
-            const double dt_mean = cycles.value(); const double ns_mean = dt_mean / (double)clock * 1e3;
-            const double dt_max  = cycles.getPercentile(0.9); const double ns_max  = dt_max  / (double)clock * 1e3;
-
-            // Compute bandwidth for Bandwidth pings
-            string bw_str = "N/A"; // in GB/s
-            if (o.kind == ppnt::PingKind::Bandwidth) {
-                size_t iter_bytes = blockD.x * k2_n_datas * 16;
-                double bw_gbps = ((double)iter_bytes / (ns_mean)) ; // GB/s
-                bw_str = to_string(bw_gbps);
-            }
-
-            // Report
-            cout << "[PPNT] Ping id=" << setw(2) << i << " "
-                 << "kind=" << ((o.kind == ppnt::PingKind::Latency) ? "Latency" : "Bandwidth") << " "
-                 << "src_xcd=" << setw(1) << o.src_xcd << " "
-                 << "dst_hbm=" << setw(1) << o.dst_hbm << " "
-                 << "iters=" << setw(8) << o.iters << " "
-                 << fixed << setprecision(1)
-                 << "mean_ns=" << setw(3) << ns_mean << " "
-                 << "p90_ns=" << setw(3) << ns_max << " "
-                 << "GBps=" << setw(3) << bw_str << " "
-                 << "\n" << flush;
-        }
+        ppnt::parse_pingouts(d_out, n_plan, TARGET_BLOCKDIM_X, clock);
 
     } /* ppnt */
 
-    // // --- Allocate per-expert weights ---
-    // vector<float> h_W1((size_t)E * d * hidden);
-    // vector<float> h_W2((size_t)E * hidden * d);
-    // fill_random(h_W1);
-    // fill_random(h_W2);
 
-    // float *d_W1=nullptr, *d_W2=nullptr, *d_Tmp=nullptr, *d_Yexp=nullptr;
-    // gpuErrchk(hipMalloc(&d_W1, sizeof(float) * h_W1.size()));
-    // gpuErrchk(hipMalloc(&d_W2, sizeof(float) * h_W2.size()));
-    // gpuErrchk(hipMemcpyAsync(d_W1, h_W1.data(), sizeof(float) * h_W1.size(), hipMemcpyHostToDevice, stream));
-    // gpuErrchk(hipMemcpyAsync(d_W2, h_W2.data(), sizeof(float) * h_W2.size(), hipMemcpyHostToDevice, stream));
+    // =============================================================================================
+    // FFN SETUP & EXECUTION (GEMM1 -> ReLU -> GEMM2)
+    // =============================================================================================
 
-    // // Tmp: [E*cap, hidden], Yexp: [E*cap, d]
-    // gpuErrchk(hipMalloc(&d_Tmp,  sizeof(float) * (size_t)E * cap * hidden));
-    // gpuErrchk(hipMalloc(&d_Yexp, sizeof(float) * (size_t)E * cap * d));
+    // Cooperative Kernel Grid Configuration
+    const int num_sms = CU_NUM * XCD_NUM;;
+    const int max_blocks_per_sm = 2;
+    const int threads_per_block = 1024; 
+    const int target_physical_blocks = max_blocks_per_sm * num_sms;
+    
+    // PPNT Requirement: Grid size must be divisible by XCD_NUM to ensure even distribution
+    // We round DOWN to the nearest multiple of XCD_NUM to stay within resident limits.
+    int physical_grid_size = (target_physical_blocks / XCD_NUM) * XCD_NUM;
+    
+    // Safety clamp (optional, prevents extremely small grids on weird hardware)
+    if (physical_grid_size < XCD_NUM) physical_grid_size = XCD_NUM;
 
-    // // --- Launch per-expert GEMM1 ---
-    // dim3 block1(16, 8, 1);
-    // dim3 grid1((hidden + block1.x - 1) / block1.x,
-    //         (cap    + block1.y - 1) / block1.y,
-    //         E);
-    // hipLaunchKernelGGL(expert_gemm1_naive, grid1, block1, 0, stream,
-    //                 d_Xexp, d_W1, d_Tmp, d_cnt, E, cap, d, hidden);
+    // The number of "working" blocks will be physical_grid_size - XCD_NUM
+    int logical_blocks = physical_grid_size - XCD_NUM;
 
-    // // --- ReLU Tmp ---
-    // int total_tmp = E * cap * hidden;
-    // dim3 blockA(256);
-    // dim3 gridA((total_tmp + blockA.x - 1) / blockA.x);
-    // hipLaunchKernelGGL(relu_tmp_expert, gridA, blockA, 0, stream,
-    //                 d_Tmp, d_cnt, E, cap, hidden);
+#if DEBUG_LEVEL >= 1
+    cout << "[PPNT] Cooperative Grid Config:\n"
+         << "       Max Blocks/SM: " << max_blocks_per_sm << "\n"
+         << "       Total SMs: " << num_sms << "\n"
+         << "       Physical Grid: " << physical_grid_size << " blocks\n"
+         << "       Logical Workers: " << logical_blocks << " blocks\n" << flush;
+#endif
 
-    // // --- Launch per-expert GEMM2 ---
-    // dim3 block2(16, 8, 1);
-    // dim3 grid2((d   + block2.x - 1) / block2.x,
-    //         (cap + block2.y - 1) / block2.y,
-    //         E);
-    // hipLaunchKernelGGL(expert_gemm2_naive, grid2, block2, 0, stream,
-    //                 d_Tmp, d_W2, d_Yexp, d_cnt, E, cap, d, hidden);
+    // Allocations
+    std::vector<float> h_W1((size_t)E * d * hidden);
+    std::vector<float> h_W2((size_t)E * hidden * d);
+    fill_random(h_W1);
+    fill_random(h_W2);
 
-    // // --- Combine back to token order ---
-    // // For top-1 routing, your prior moe_gather is fine:
-    // hipLaunchKernelGGL(moe_gather, gridD, blockD, 0, stream,
-    //                 d_Yexp, d_pos, d_Y, T, d, cap);
+    float *d_W1=nullptr, *d_W2=nullptr, *d_Tmp=nullptr, *d_Yexp=nullptr;
+    gpuErrchk(hipMalloc(&d_W1, sizeof(float) * h_W1.size()));
+    gpuErrchk(hipMalloc(&d_W2, sizeof(float) * h_W2.size()));
+    gpuErrchk(hipMemcpyAsync(d_W1, h_W1.data(), sizeof(float) * h_W1.size(), hipMemcpyHostToDevice, stream));
+    gpuErrchk(hipMemcpyAsync(d_W2, h_W2.data(), sizeof(float) * h_W2.size(), hipMemcpyHostToDevice, stream));
 
-    // // Cleanup later: d_W1, d_W2, d_Tmp, d_Yexp
+    // Tmp: [E*cap, hidden], holds output of GEMM1 (Up-proj)
+    // Yexp: [E*cap, d], holds output of GEMM2 (Down-proj)
+    gpuErrchk(hipMalloc(&d_Tmp,  sizeof(float) * (size_t)E * cap * hidden));
+    gpuErrchk(hipMalloc(&d_Yexp, sizeof(float) * (size_t)E * cap * d));
 
+    {
+        // =========================================================================================
+        // PPNT
+        // =========================================================================================
+        
+        // GEMM1
+        // Xexp[E,cap,d] * W1[E,d,hidden] -> Tmp[E,cap,hidden]
+
+        Gemm1Args h_args = {d_Xexp, d_W1, d_Tmp, d_cnt, E, cap, d, hidden};
+        Gemm1Args* d_args = nullptr;
+        gpuErrchk(hipMalloc(&d_args, sizeof(Gemm1Args)));
+        gpuErrchk(hipMemcpyAsync(d_args, &h_args, sizeof(Gemm1Args), hipMemcpyHostToDevice, stream));
+
+        Gemm1TargetFn fn{};
+        void* kargs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&n_plan, (void*)&d_out };
+
+#if DEBUG_LEVEL >= 1
+        cout << "[PPNT] " 
+             << "Launching GEMM1 with "
+             << n_plan << " pings"
+             << "\n" << flush;
+#endif
+
+        gpuErrchk(hipLaunchCooperativeKernel(
+            (void*)ppnt::fused_kernel<Gemm1TargetFn, Gemm1Args>,
+            dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
+        gpuErrchk(hipStreamSynchronize(stream));
+        ppnt::parse_pingouts(d_out, n_plan, TARGET_BLOCKDIM_X, clock);
+    }
+
+    {
+        // =========================================================================================
+        // PPNT
+        // =========================================================================================
+        
+        // ReLU
+        // Tmp[E,cap,hidden] -> Tmp[E,cap,hidden]
+
+        ReluArgs h_args = {d_Tmp, d_cnt, E, cap, hidden};
+        ReluArgs* d_args = nullptr;
+        gpuErrchk(hipMalloc(&d_args, sizeof(ReluArgs)));
+        gpuErrchk(hipMemcpyAsync(d_args, &h_args, sizeof(ReluArgs), hipMemcpyHostToDevice, stream));
+
+        ReluTargetFn fn{};
+        void* kargs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&n_plan, (void*)&d_out };
+
+#if DEBUG_LEVEL >= 1
+        cout << "[PPNT] " 
+             << "Launching ReLU with "
+             << n_plan << " pings"
+             << "\n" << flush;
+#endif
+
+        gpuErrchk(hipLaunchCooperativeKernel(
+            (void*)ppnt::fused_kernel<ReluTargetFn, ReluArgs>,
+            dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
+        gpuErrchk(hipStreamSynchronize(stream));
+        ppnt::parse_pingouts(d_out, n_plan, TARGET_BLOCKDIM_X, clock);
+    }
+
+    {
+        // =========================================================================================
+        // PPNT
+        // =========================================================================================
+        
+        // GEMM2
+        // Tmp[E,cap,hidden] * W2[E,hidden,d] -> Yexp[E,cap,d]
+
+        Gemm2Args h_args = {d_Tmp, d_W2, d_Yexp, d_cnt, E, cap, d, hidden};
+        Gemm2Args* d_args = nullptr;
+        gpuErrchk(hipMalloc(&d_args, sizeof(Gemm2Args)));
+        gpuErrchk(hipMemcpyAsync(d_args, &h_args, sizeof(Gemm2Args), hipMemcpyHostToDevice, stream));
+
+        Gemm2TargetFn fn{};
+        void* kargs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&n_plan, (void*)&d_out };
+
+#if DEBUG_LEVEL >= 1
+        cout << "[PPNT] " 
+             << "Launching GEMM2 with "
+             << n_plan << " pings"
+             << "\n" << flush;
+#endif
+
+        gpuErrchk(hipLaunchCooperativeKernel(
+            (void*)ppnt::fused_kernel<Gemm2TargetFn, Gemm2Args>,
+            dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
+        gpuErrchk(hipStreamSynchronize(stream));
+        ppnt::parse_pingouts(d_out, n_plan, TARGET_BLOCKDIM_X, clock);
+    }
+
+    {
+        // =========================================================================================
+        // PPNT
+        // =========================================================================================
+        
+        // Gather
+        // Yexp[E,cap,d] -> Y[T,d]
+
+        GatherArgs h_args = {d_Yexp, d_pos, d_Y, T, d, cap};
+        GatherArgs* d_args = nullptr;
+        gpuErrchk(hipMalloc(&d_args, sizeof(GatherArgs)));
+        gpuErrchk(hipMemcpyAsync(d_args, &h_args, sizeof(GatherArgs), hipMemcpyHostToDevice, stream));
+
+        GatherTargetFn fn{};
+        void* kargs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&n_plan, (void*)&d_out };
+
+#if DEBUG_LEVEL >= 1
+        cout << "[PPNT] " 
+             << "Launching GATHER with "
+             << n_plan << " pings"
+             << "\n" << flush;
+#endif
+
+        gpuErrchk(hipLaunchCooperativeKernel(
+                    (void*)ppnt::fused_kernel<GatherTargetFn, GatherArgs>,
+                    dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
+        gpuErrchk(hipStreamSynchronize(stream));
+        ppnt::parse_pingouts(d_out, n_plan, TARGET_BLOCKDIM_X, clock);
+    }
+
+    // Cleanup later: d_W1, d_W2, d_Tmp, d_Yexp
+    return 0;
 }
 

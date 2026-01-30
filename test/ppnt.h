@@ -167,4 +167,52 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
     }
 }
 
+void parse_pingouts(PingOut* d_out, const size_t n_plan, const size_t blockD_x, const size_t clock) {
+
+    // Check PingOut results
+    // TODO: temporarily done here, move to end of main later on.
+    for (size_t i = 0; i < n_plan; i++) {
+        ppnt::PingOut o;
+        gpuErrchk(hipMemcpy(&o, &d_out[i], sizeof(ppnt::PingOut), hipMemcpyDeviceToHost));
+
+        // Copy per-iteration clock data to host
+        // TODO: this may also need to change when k2_bpx > 1
+        vector<uint64_t> h_iterClk(o.iters);
+        gpuErrchk(hipMemcpy(h_iterClk.data(), o.iterClk, sizeof(uint64_t) * o.iters, hipMemcpyDeviceToHost));
+
+        // Compute average cycles per iteration
+        MeasurementSeries cycles;
+        for (size_t it = 0; it < o.iters; it++) {
+            cycles.add(h_iterClk[it]);
+#if DEBUG_LEVEL >= 3
+            cout << "[PPNT] Ping id=" << i << " iter=" << it << " cycles=" << h_iterClk[it] << "\n" << flush;
+#endif
+        }
+        // 1e3 as clock in MHz
+        const double dt_mean = cycles.value(); const double ns_mean = dt_mean / (double)clock * 1e3;
+        const double dt_max  = cycles.getPercentile(0.9); const double ns_max  = dt_max  / (double)clock * 1e3;
+
+        // Compute bandwidth for Bandwidth pings
+        string bw_str = "N/A"; // in GB/s
+        if (o.kind == ppnt::PingKind::Bandwidth) {
+            const size_t k2_n_datas = 4; // k2 uses 4 data pointers
+            size_t iter_bytes = blockD_x * k2_n_datas * 16;
+            double bw_gbps = ((double)iter_bytes / (ns_mean)) ; // GB/s
+            bw_str = to_string(bw_gbps);
+        }
+
+        // Report
+        cout << "[PPNT] Ping id=" << setw(2) << i << " "
+                << "kind=" << ((o.kind == ppnt::PingKind::Latency) ? "Latency" : "Bandwidth") << " "
+                << "src_xcd=" << setw(1) << o.src_xcd << " "
+                << "dst_hbm=" << setw(1) << o.dst_hbm << " "
+                << "iters=" << setw(8) << o.iters << " "
+                << fixed << setprecision(1)
+                << "mean_ns=" << setw(3) << ns_mean << " "
+                << "p90_ns=" << setw(3) << ns_max << " "
+                << "GBps=" << setw(3) << bw_str << " "
+                << "\n" << flush;
+    }
+}
+
 } // namespace ppnt

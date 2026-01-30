@@ -94,6 +94,228 @@ struct DispatchTargetFn {
     }
 };
 
+
 // =============================================================================================
-// GEMM
+// GATHER
 // =============================================================================================
+
+struct GatherArgs {
+    const float* __restrict__ Src; // Input: [E*cap, d] (was Yexp)
+    const int* __restrict__ pos;   // Input: [T]
+    float* __restrict__ Dst;       // Output: [T, d] (was Y)
+    int T, d, cap;
+};
+
+struct GatherTargetFn {
+    __device__ __forceinline__
+    void operator()(const GatherArgs* __restrict__ a,
+                    int bid, int tid, int gridDimX, int blockDimX) const 
+    {
+        // 1. PPNT Logic setup
+        int n_tbs_in_xcd = gridDimX / XCD_NUM;
+        int logical_bid = ppnt::physical_to_logical_bid_skip_one(bid, n_tbs_in_xcd, PPNT_TBID_IN_XCD);
+        int logical_grid_size = (n_tbs_in_xcd - 1) * XCD_NUM; 
+
+        // 2. Parallelize over Tokens (T)
+        // Global stride = total number of threads in the logical grid
+        int total_worker_threads = logical_grid_size * blockDimX;
+        
+        // Start index for this specific thread
+        int start_t = logical_bid * blockDimX + tid;
+
+        // 3. Grid-Stride Loop
+        for (int t = start_t; t < a->T; t += total_worker_threads) {
+            
+            int slot = a->pos[t];
+            float* dst_ptr = a->Dst + (size_t)t * a->d;
+
+            if (slot < 0) {
+                // Token was dropped or padding; zero output
+                for (int j = 0; j < a->d; j++) {
+                    dst_ptr[j] = 0.f;
+                }
+            } else {
+                // Gather copy
+                // Src is [E * cap, d]
+                const float* src_ptr = a->Src + (size_t)slot * a->d;
+                for (int j = 0; j < a->d; j++) {
+                    dst_ptr[j] = src_ptr[j];
+                }
+            }
+        }
+    }
+};
+
+
+// =============================================================================================
+// GEMM 1 (FFN Up Projection)
+// =============================================================================================
+
+struct Gemm1Args {
+    const float* __restrict__ Xexp; // [E*cap, d]
+    const float* __restrict__ W1;   // [E, d, hidden]
+    float* __restrict__ Tmp;        // [E*cap, hidden]
+    const int* __restrict__ cnt;    // [E]
+    int E, cap, d, hidden;
+};
+
+struct Gemm1TargetFn {
+    __device__ __forceinline__
+    void operator()(const Gemm1Args* __restrict__ a,
+                    int bid, int tid, int gridDimX, int blockDimX) const 
+    {
+        // 1. Setup Grid-Stride Logic
+        int n_tbs_in_xcd = gridDimX / XCD_NUM;
+        int logical_bid = ppnt::physical_to_logical_bid_skip_one(bid, n_tbs_in_xcd, PPNT_TBID_IN_XCD);
+        
+        // Total working blocks available in the grid
+        int logical_grid_size = (n_tbs_in_xcd - 1) * XCD_NUM; 
+
+        // 2. Define Problem Dimensions
+        int block_x = 32; 
+        int block_y = 32;
+        int grid_dim_x = (a->hidden + block_x - 1) / block_x;
+        int grid_dim_y = (a->cap    + block_y - 1) / block_y;
+        
+        // Total number of tiles to process
+        int total_tiles = grid_dim_x * grid_dim_y * a->E;
+
+        // 3. Grid-Stride Loop
+        for (int curr_tile = logical_bid; curr_tile < total_tiles; curr_tile += logical_grid_size) {
+            
+            // Reconstruct indices from linear 'curr_tile'
+            int slice = grid_dim_x * grid_dim_y;
+            int e   = curr_tile / slice;          
+            int rem = curr_tile % slice;
+            int by  = rem / grid_dim_x;             
+            int bx  = rem % grid_dim_x;             
+
+            // --- Original Logic Starts Here ---
+            int ty = tid / block_x; 
+            int tx = tid % block_x;
+
+            int j = bx * block_x + tx; 
+            int t = by * block_y + ty; 
+            
+            if (t >= a->cap || j >= a->hidden) continue;
+
+            int ne = a->cnt[e];
+            if (t >= ne) {
+                a->Tmp[(e * a->cap + t) * a->hidden + j] = 0.f;
+                continue;
+            }
+
+            const float* x = a->Xexp + (e * a->cap + t) * a->d;
+            const float* w = a->W1 + ((size_t)e * a->d * a->hidden);
+            
+            float acc = 0.f;
+            for (int k = 0; k < a->d; k++) {
+                acc += x[k] * w[(size_t)k * a->hidden + j];
+            }
+            a->Tmp[(e * a->cap + t) * a->hidden + j] = acc;
+        }
+    }
+};
+
+
+// =============================================================================================
+// GEMM 2 (FFN Down Projection)
+// =============================================================================================
+
+struct Gemm2Args {
+    const float* __restrict__ Tmp; // [E*cap, hidden]
+    const float* __restrict__ W2;  // [E, hidden, d]
+    float* __restrict__ Yexp;      // [E*cap, d]
+    const int* __restrict__ cnt;   // [E]
+    int E, cap, d, hidden;
+};
+
+struct Gemm2TargetFn {
+    __device__ __forceinline__
+    void operator()(const Gemm2Args* __restrict__ a,
+                    int bid, int tid, int gridDimX, int blockDimX) const 
+    {
+        int n_tbs_in_xcd = gridDimX / XCD_NUM;
+        int logical_bid = ppnt::physical_to_logical_bid_skip_one(bid, n_tbs_in_xcd, PPNT_TBID_IN_XCD);
+        int logical_grid_size = (n_tbs_in_xcd - 1) * XCD_NUM; 
+
+        int block_x = 32; 
+        int block_y = 32;
+        int grid_dim_x = (a->d   + block_x - 1) / block_x; 
+        int grid_dim_y = (a->cap + block_y - 1) / block_y;
+        
+        int total_tiles = grid_dim_x * grid_dim_y * a->E;
+
+        for (int curr_tile = logical_bid; curr_tile < total_tiles; curr_tile += logical_grid_size) {
+            
+            int slice = grid_dim_x * grid_dim_y;
+            int e   = curr_tile / slice; 
+            int rem = curr_tile % slice;
+            int by  = rem / grid_dim_x; 
+            int bx  = rem % grid_dim_x;
+
+            int ty = tid / block_x; 
+            int tx = tid % block_x;
+
+            int j = bx * block_x + tx; 
+            int t = by * block_y + ty; 
+            
+            if (t >= a->cap || j >= a->d) continue;
+
+            int ne = a->cnt[e];
+            if (t >= ne) {
+                a->Yexp[(e * a->cap + t) * a->d + j] = 0.f;
+                continue;
+            }
+
+            const float* tmp = a->Tmp + (e * a->cap + t) * a->hidden;
+            const float* w = a->W2 + ((size_t)e * a->hidden * a->d);
+            float acc = 0.f;
+            for (int k = 0; k < a->hidden; k++) {
+                acc += tmp[k] * w[(size_t)k * a->d + j];
+            }
+            a->Yexp[(e * a->cap + t) * a->d + j] = acc;
+        }
+    }
+};
+
+
+// =============================================================================================
+// ReLU (Element-wise)
+// =============================================================================================
+
+struct ReluArgs {
+    float* __restrict__ Tmp;
+    const int* __restrict__ cnt;
+    int E, cap, hidden;
+};
+
+struct ReluTargetFn {
+    __device__ __forceinline__
+    void operator()(const ReluArgs* __restrict__ a,
+                    int bid, int tid, int gridDimX, int blockDimX) const 
+    {
+        int n_tbs_in_xcd = gridDimX / XCD_NUM;
+        int logical_bid = ppnt::physical_to_logical_bid_skip_one(bid, n_tbs_in_xcd, PPNT_TBID_IN_XCD);
+        int logical_grid_size = (n_tbs_in_xcd - 1) * XCD_NUM; 
+
+        // Total elements to process
+        int total_elems = a->E * a->cap * a->hidden;
+        
+        // Stride is logical_grid * blockDim
+        int stride = logical_grid_size * blockDimX;
+        int start_idx = logical_bid * blockDimX + tid;
+
+        for (int idx = start_idx; idx < total_elems; idx += stride) {
+            
+            int tc = idx / a->hidden;
+            int t  = tc % a->cap;
+            int e  = tc / a->cap;
+
+            if (t >= a->cnt[e]) continue;
+
+            float val = a->Tmp[idx];
+            a->Tmp[idx] = val > 0.f ? val : 0.f;
+        }
+    }
+};
