@@ -673,6 +673,27 @@ int main(int argc, char **argv) {
     // PPNT EXECUTION WITH MoE KERNELS
     // =============================================================================================
 
+    // 0. PPNT ONLY: For baseline profiling
+    {
+#if DEBUG_LEVEL >= 1
+        cout << "\n\nPPNT ONLY BASELINE" << "\n" << flush;
+#endif
+        ppnt::TargetArgsT h_args{};
+        ppnt::TargetArgsT* d_args = nullptr;
+        gpuErrchk(hipMalloc(&d_args, sizeof(ppnt::TargetArgsT)));
+        gpuErrchk(hipMemcpyAsync(d_args, &h_args, sizeof(ppnt::TargetArgsT), hipMemcpyHostToDevice, stream));
+        
+        ppnt::TargetFnT fn{};
+        size_t _n_plan = n_plan;
+        void* kargs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&_n_plan, (void*)&d_out };
+
+        gpuErrchk(hipLaunchCooperativeKernel(
+            (void*)ppnt::fused_kernel<ppnt::TargetFnT, ppnt::TargetArgsT>,
+            dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
+        gpuErrchk(hipStreamSynchronize(stream));
+        ppnt::parse_pingouts(d_plan, d_out, _n_plan, TARGET_BLOCKDIM_X, clock);
+    }
+
     // 1. ATTENTION LAYER: QKV Projection (X -> QKV)
     { 
 #if DEBUG_LEVEL >= 1

@@ -96,7 +96,7 @@ struct AttnQKVArgs {
 struct AttnQKVTargetFn {
     __device__ __forceinline__
     void operator()(const AttnQKVArgs* __restrict__ a,
-                    int bid, int tid, int gridDimX, int blockDimX, size_t n_ppnt_tbs_in_xcd) const 
+                    int bid, int tid, int gridDimX, int blockDimX, int n_ppnt_tbs_in_xcd) const 
     {
         // 1. PPNT Grid Setup
         int n_tbs_in_xcd = gridDimX / XCD_NUM;
@@ -155,7 +155,7 @@ struct AttnOutArgs {
 struct AttnOutTargetFn {
     __device__ __forceinline__
     void operator()(const AttnOutArgs* __restrict__ a,
-                    int bid, int tid, int gridDimX, int blockDimX, size_t n_ppnt_tbs_in_xcd) const 
+                    int bid, int tid, int gridDimX, int blockDimX, int n_ppnt_tbs_in_xcd) const 
     {
         int n_tbs_in_xcd = gridDimX / XCD_NUM;
         int logical_bid = ppnt::physical_to_logical_bid(bid, n_tbs_in_xcd, n_ppnt_tbs_in_xcd);
@@ -232,7 +232,7 @@ void moe_scatter_body(int t, const ScatterArgs* __restrict__ a) {
 struct ScatterTargetFn {
     __device__ __forceinline__
     void operator()(const ScatterArgs* __restrict__ a,
-                    int bid, int tid, int gridDimX, int blockDimX, size_t n_ppnt_tbs_in_xcd) const 
+                    int bid, int tid, int gridDimX, int blockDimX, int n_ppnt_tbs_in_xcd) const 
     {
         // 1. PPNT Logic Setup
         int n_tbs_in_xcd = gridDimX / XCD_NUM;
@@ -271,7 +271,7 @@ struct GatherArgs {
 struct GatherTargetFn {
     __device__ __forceinline__
     void operator()(const GatherArgs* __restrict__ a,
-                    int bid, int tid, int gridDimX, int blockDimX, size_t n_ppnt_tbs_in_xcd) const 
+                    int bid, int tid, int gridDimX, int blockDimX, int n_ppnt_tbs_in_xcd) const 
     {
         // 1. PPNT Logic setup
         int n_tbs_in_xcd = gridDimX / XCD_NUM;
@@ -324,7 +324,7 @@ struct Gemm1Args {
 struct Gemm1TargetFn {
     __device__ __forceinline__
     void operator()(const Gemm1Args* __restrict__ a,
-                    int bid, int tid, int gridDimX, int blockDimX, size_t n_ppnt_tbs_in_xcd) const 
+                    int bid, int tid, int gridDimX, int blockDimX, int n_ppnt_tbs_in_xcd) const 
     {
         int n_tbs_in_xcd = gridDimX / XCD_NUM;
         int logical_bid = ppnt::physical_to_logical_bid(bid, n_tbs_in_xcd, n_ppnt_tbs_in_xcd);
@@ -393,7 +393,7 @@ struct Gemm2Args {
 struct Gemm2TargetFn {
     __device__ __forceinline__
     void operator()(const Gemm2Args* __restrict__ a,
-                    int bid, int tid, int gridDimX, int blockDimX, size_t n_ppnt_tbs_in_xcd) const 
+                    int bid, int tid, int gridDimX, int blockDimX, int n_ppnt_tbs_in_xcd) const 
     {
         int n_tbs_in_xcd = gridDimX / XCD_NUM;
         int logical_bid = ppnt::physical_to_logical_bid(bid, n_tbs_in_xcd, n_ppnt_tbs_in_xcd);
@@ -457,7 +457,7 @@ struct ReluArgs {
 struct ReluTargetFn {
     __device__ __forceinline__
     void operator()(const ReluArgs* __restrict__ a,
-                    int bid, int tid, int gridDimX, int blockDimX, size_t n_ppnt_tbs_in_xcd) const 
+                    int bid, int tid, int gridDimX, int blockDimX, int n_ppnt_tbs_in_xcd) const 
     {
         int n_tbs_in_xcd = gridDimX / XCD_NUM;
         int logical_bid = ppnt::physical_to_logical_bid(bid, n_tbs_in_xcd, n_ppnt_tbs_in_xcd);

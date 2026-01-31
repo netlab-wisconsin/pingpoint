@@ -15,6 +15,12 @@ namespace cg = cooperative_groups;
 
 namespace ppnt {
 
+struct TargetArgsT {};
+struct TargetFnT { 
+    __device__ __forceinline__
+    void operator()(const TargetArgsT*, int, int, int, int, int){}
+};
+
 enum class PingKind : uint8_t { Latency=0, Bandwidth=1 };
 
 struct PingSpec {
@@ -89,7 +95,7 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
         grid.sync();
 
         const PingSpec& spec = plan[i];
-#if DEBUG_PPNT_LEVEL >= 0
+#if DEBUG_PPNT_LEVEL >= 1
         if (bid == 0 && tid == 0) {
             printf("spec[%d]: ping_id=%d, kind=%d, src_xcd=%d, dst_hbm=%d, iters=%zu, bpx=%zu\n", \
                 i, spec.ping_id, (int)spec.kind, spec.src_xcd, spec.dst_hbm, spec.iters, spec.bpx);
@@ -99,7 +105,7 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
         if (tbid_in_xcd < spec.bpx) {
             /* Run profiling */
 
-#if DEBUG_PPNT_LEVEL >= 1
+#if DEBUG_PPNT_LEVEL >= 2
             if (tid == 0) {
                 printf("[profile] bid %d: (xcc_id: %u, se_id: %u, cu_id: %u)\n", \
                     bid, xcc_id, se_id, cu_id);
@@ -132,7 +138,7 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
             else 
             { 
                 // unknown ping kind
-#if DEBUG_PPNT_LEVEL >= 1
+#if DEBUG_PPNT_LEVEL >= 2
                 if (tid == 0) printf("unknown ping kind\n");
                 return;
 #endif
@@ -140,14 +146,6 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
 
         } else {
             /* Run target fn */
-
-#if DEBUG_PPNT_LEVEL >= 1
-            if (tid == 0) {
-                printf("[target] bid %d: (xcc_id: %u, se_id: %u, cu_id: %u)\n", \
-                    bid, xcc_id, se_id, cu_id);
-            }
-#endif
-
             target_fn(targs, bid, tid, gridDim.x, blockDim.x, spec.bpx);
         }
 
@@ -170,7 +168,7 @@ void parse_pingouts(PingSpec* d_plan, PingOut* d_out, const size_t n_plan, const
         // Copy per-iteration clock data to host
         size_t n = p.iters * p.bpx;
         vector<uint64_t> h_iterClk(n);
-#if DEBUG_PPNT_LEVEL >= 1
+#if DEBUG_PPNT_LEVEL >= 2
         cout << "[PPNT] Parsing pingout id=" << i << " (kind=" 
              << ((p.kind == ppnt::PingKind::Latency) ? "Latency" : "Bandwidth") << ") "
              << p.iters << " iters " << p.bpx << " bpx"
