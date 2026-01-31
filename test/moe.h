@@ -55,12 +55,12 @@ struct AttnQKVArgs {
 struct AttnQKVTargetFn {
     __device__ __forceinline__
     void operator()(const AttnQKVArgs* __restrict__ a,
-                    int bid, int tid, int gridDimX, int blockDimX) const 
+                    int bid, int tid, int gridDimX, int blockDimX, size_t n_ppnt_tbs_in_xcd) const 
     {
         // 1. PPNT Grid Setup
         int n_tbs_in_xcd = gridDimX / XCD_NUM;
-        int logical_bid = ppnt::physical_to_logical_bid_skip_one(bid, n_tbs_in_xcd, PPNT_TBID_IN_XCD);
-        int logical_grid_size = (n_tbs_in_xcd - 1) * XCD_NUM; 
+        int logical_bid = ppnt::physical_to_logical_bid(bid, n_tbs_in_xcd, n_ppnt_tbs_in_xcd);
+        int logical_grid_size = (n_tbs_in_xcd - (int)n_ppnt_tbs_in_xcd) * XCD_NUM;
 
         // 2. Dimensions
         int out_dim = 3 * a->d; // Q, K, V concatenated
@@ -72,9 +72,6 @@ struct AttnQKVTargetFn {
         int total_tiles = grid_dim_x * grid_dim_y;
 
         // 3. Grid-Stride Loop
-#if DEBUG_MOE_KERNEL
-        uint64_t loop_start = __builtin_readcyclecounter();
-#endif
         for (int curr_tile = logical_bid; curr_tile < total_tiles; curr_tile += logical_grid_size) {
             
             int by = curr_tile / grid_dim_x; // Token chunk
@@ -99,12 +96,6 @@ struct AttnQKVTargetFn {
             }
             a->QKV[(size_t)t * out_dim + j] = acc;
         }
-#if DEBUG_MOE_KERNEL
-        uint64_t loop_end = __builtin_readcyclecounter();
-        if (tid == 0) {
-            printf("AttnQKV loop cycles: %lu\n", loop_end - loop_start);
-        }
-#endif
     }
 };
 
@@ -123,11 +114,11 @@ struct AttnOutArgs {
 struct AttnOutTargetFn {
     __device__ __forceinline__
     void operator()(const AttnOutArgs* __restrict__ a,
-                    int bid, int tid, int gridDimX, int blockDimX) const 
+                    int bid, int tid, int gridDimX, int blockDimX, size_t n_ppnt_tbs_in_xcd) const 
     {
         int n_tbs_in_xcd = gridDimX / XCD_NUM;
-        int logical_bid = ppnt::physical_to_logical_bid_skip_one(bid, n_tbs_in_xcd, PPNT_TBID_IN_XCD);
-        int logical_grid_size = (n_tbs_in_xcd - 1) * XCD_NUM; 
+        int logical_bid = ppnt::physical_to_logical_bid(bid, n_tbs_in_xcd, n_ppnt_tbs_in_xcd);
+        int logical_grid_size = (n_tbs_in_xcd - (int)n_ppnt_tbs_in_xcd) * XCD_NUM;
 
         int in_dim = 3 * a->d; 
         int out_dim = a->d;
@@ -164,10 +155,10 @@ struct AttnOutTargetFn {
 };
 
 // =============================================================================================
-// DISPATCH
+// SCATTER
 // =============================================================================================
 
-struct DispatchArgs {
+struct ScatterArgs {
     const float* X;            // [T, d]
     const int*   expert_id;    // [T]
     float*       Xexp;         // [E*cap, d]
@@ -177,7 +168,7 @@ struct DispatchArgs {
 };
 
 __device__ __forceinline__
-void moe_dispatch_body(int t, const DispatchArgs* __restrict__ a) {
+void moe_scatter_body(int t, const ScatterArgs* __restrict__ a) {
     if (t >= a->T) return;
 
     int e = a->expert_id[t];
@@ -197,24 +188,30 @@ void moe_dispatch_body(int t, const DispatchArgs* __restrict__ a) {
     for (int j = 0; j < a->d; j++) dst[j] = src[j];
 }
 
-struct DispatchTargetFn {
+struct ScatterTargetFn {
     __device__ __forceinline__
-    void operator()(const DispatchArgs* __restrict__ a,
-                    int bid, int tid, int gridDimX, int blockDimX) const 
+    void operator()(const ScatterArgs* __restrict__ a,
+                    int bid, int tid, int gridDimX, int blockDimX, size_t n_ppnt_tbs_in_xcd) const 
     {
+        // 1. PPNT Logic Setup
         int n_tbs_in_xcd = gridDimX / XCD_NUM;
-        int tbid_in_xcd  = (bid / XCD_NUM) % n_tbs_in_xcd;
+        int logical_bid = ppnt::physical_to_logical_bid(bid, n_tbs_in_xcd, n_ppnt_tbs_in_xcd);
 
-        // Skip profiling TBs (those do not execute target)
-        if (tbid_in_xcd == PPNT_TBID_IN_XCD) return;
+        // Calculate logical grid size (Total physical blocks - Reserved blocks)
+        int logical_grid_size = (n_tbs_in_xcd - (int)n_ppnt_tbs_in_xcd) * XCD_NUM; 
 
-        int logical_bid = ppnt::physical_to_logical_bid_skip_one(bid, n_tbs_in_xcd, PPNT_TBID_IN_XCD);
-
-        /* Insert target kernel below */
+        // 2. Parallelize over Tokens (T)
+        // Global stride = total number of threads in the logical grid
+        int total_worker_threads = logical_grid_size * blockDimX;
         
-        // Token index based on logical block id
-        int t = logical_bid * blockDimX + tid;
-        moe_dispatch_body(t, a);
+        // Start index for this specific thread
+        int start_t = logical_bid * blockDimX + tid;
+
+        // 3. Grid-Stride Loop
+        // Iterate until all tokens T are processed
+        for (int t = start_t; t < a->T; t += total_worker_threads) {
+            moe_scatter_body(t, a);
+        }
     }
 };
 
@@ -233,12 +230,12 @@ struct GatherArgs {
 struct GatherTargetFn {
     __device__ __forceinline__
     void operator()(const GatherArgs* __restrict__ a,
-                    int bid, int tid, int gridDimX, int blockDimX) const 
+                    int bid, int tid, int gridDimX, int blockDimX, size_t n_ppnt_tbs_in_xcd) const 
     {
         // 1. PPNT Logic setup
         int n_tbs_in_xcd = gridDimX / XCD_NUM;
-        int logical_bid = ppnt::physical_to_logical_bid_skip_one(bid, n_tbs_in_xcd, PPNT_TBID_IN_XCD);
-        int logical_grid_size = (n_tbs_in_xcd - 1) * XCD_NUM; 
+        int logical_bid = ppnt::physical_to_logical_bid(bid, n_tbs_in_xcd, n_ppnt_tbs_in_xcd);
+        int logical_grid_size = (n_tbs_in_xcd - (int)n_ppnt_tbs_in_xcd) * XCD_NUM;
 
         // 2. Parallelize over Tokens (T)
         // Global stride = total number of threads in the logical grid
@@ -286,11 +283,11 @@ struct Gemm1Args {
 struct Gemm1TargetFn {
     __device__ __forceinline__
     void operator()(const Gemm1Args* __restrict__ a,
-                    int bid, int tid, int gridDimX, int blockDimX) const 
+                    int bid, int tid, int gridDimX, int blockDimX, size_t n_ppnt_tbs_in_xcd) const 
     {
         int n_tbs_in_xcd = gridDimX / XCD_NUM;
-        int logical_bid = ppnt::physical_to_logical_bid_skip_one(bid, n_tbs_in_xcd, PPNT_TBID_IN_XCD);
-        int logical_grid_size = (n_tbs_in_xcd - 1) * XCD_NUM; 
+        int logical_bid = ppnt::physical_to_logical_bid(bid, n_tbs_in_xcd, n_ppnt_tbs_in_xcd);
+        int logical_grid_size = (n_tbs_in_xcd - (int)n_ppnt_tbs_in_xcd) * XCD_NUM;
 
         int block_x = 32; int block_y = 32;
         int grid_dim_x = (a->hidden + block_x - 1) / block_x;
@@ -355,11 +352,11 @@ struct Gemm2Args {
 struct Gemm2TargetFn {
     __device__ __forceinline__
     void operator()(const Gemm2Args* __restrict__ a,
-                    int bid, int tid, int gridDimX, int blockDimX) const 
+                    int bid, int tid, int gridDimX, int blockDimX, size_t n_ppnt_tbs_in_xcd) const 
     {
         int n_tbs_in_xcd = gridDimX / XCD_NUM;
-        int logical_bid = ppnt::physical_to_logical_bid_skip_one(bid, n_tbs_in_xcd, PPNT_TBID_IN_XCD);
-        int logical_grid_size = (n_tbs_in_xcd - 1) * XCD_NUM; 
+        int logical_bid = ppnt::physical_to_logical_bid(bid, n_tbs_in_xcd, n_ppnt_tbs_in_xcd);
+        int logical_grid_size = (n_tbs_in_xcd - (int)n_ppnt_tbs_in_xcd) * XCD_NUM;
 
         int block_x = 32; int block_y = 32;
         int grid_dim_x = (a->d   + block_x - 1) / block_x; 
@@ -419,11 +416,11 @@ struct ReluArgs {
 struct ReluTargetFn {
     __device__ __forceinline__
     void operator()(const ReluArgs* __restrict__ a,
-                    int bid, int tid, int gridDimX, int blockDimX) const 
+                    int bid, int tid, int gridDimX, int blockDimX, size_t n_ppnt_tbs_in_xcd) const 
     {
         int n_tbs_in_xcd = gridDimX / XCD_NUM;
-        int logical_bid = ppnt::physical_to_logical_bid_skip_one(bid, n_tbs_in_xcd, PPNT_TBID_IN_XCD);
-        int logical_grid_size = (n_tbs_in_xcd - 1) * XCD_NUM; 
+        int logical_bid = ppnt::physical_to_logical_bid(bid, n_tbs_in_xcd, n_ppnt_tbs_in_xcd);
+        int logical_grid_size = (n_tbs_in_xcd - (int)n_ppnt_tbs_in_xcd) * XCD_NUM;
 
         // Use size_t for total elements
         size_t total_elems = (size_t)a->E * (size_t)a->cap * (size_t)a->hidden;

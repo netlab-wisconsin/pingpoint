@@ -245,6 +245,9 @@ __device__ void k(
     const int uid = bid * blockDim.x + tid;
     assert(tid == 0); // single thread per block
 
+    int n_tbs_in_xcd = (gridDim.x / XCD_NUM); // number of thread blocks in each xcd
+    int tbid_in_xcd = (bid / XCD_NUM) % n_tbs_in_xcd; // thread block id within xcd
+
 #if 0
     uint32_t cu_id, xcc_id, se_id;
     asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID, 8, 4)" : "=r"(cu_id));
@@ -265,7 +268,7 @@ __device__ void k(
 #pragma unroll
         for (int u = 0; u < unroll_factor; u++) {
 #if DEBUG_K1_KERNEL
-            printf("(bid:%d,tid:%d,uid:%d) k1 idx[%ld]=%p\n", bid, tid, uid, n + u, idx);
+            // printf("(bid:%d,tid:%d,uid:%d) k1 idx[%ld]=%p\n", bid, tid, uid, n + u, idx);
 #endif 
 
             // Note (01/28/25) inserted for pingout
@@ -277,7 +280,11 @@ __device__ void k(
             // Note (01/28/25) inserted for pingout
             asm volatile("s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t" ::: "memory");
             uint64_t end = __builtin_readcyclecounter();
-            po_iterClk[n + u] = end - start;
+            // (Note 01/30/26) assume first bpx blocks are profiling blocks
+            // Every ping activates a single source XCD. So, if I mistake tbid_in_xcd with bid,
+            // it will lead to illegal memory access in the below line.
+            // Allocation of iterClk at moe.cpp and ppnt::parse_pingouts() are directly related to this.
+            po_iterClk[(tbid_in_xcd * N) + n + u] = end - start; 
         }
     }
 

@@ -26,6 +26,10 @@ using namespace std;
 
 #define TARGET_BLOCKDIM_X (1024)
 
+#define DISABLE_K1_PLANS 0
+#define DISABLE_K2_PLANS 0
+
+
 int main(int argc, char **argv) {
 
     unsigned int clock = getGPUClock();
@@ -41,7 +45,9 @@ int main(int argc, char **argv) {
     // inside the k1 kernel.
     k1::dtype *k1_dummy_buf;
     size_t k1_profile_iters = -1;
-    { 
+    {
+#if !(DISABLE_K1_PLANS) 
+
         k1::dtype *dbuf_base = nullptr;
         gpuErrchk(hipMallocManaged(&k1_dummy_buf, sizeof(k1::dtype)));
         k1_dummy_buf[0] = 0;
@@ -164,6 +170,7 @@ int main(int argc, char **argv) {
         // Copy the full pointer table into device allocation.
         gpuErrchk(hipMemcpy(dbuf_base, buf.data(), n_dtype_dbuf * sizeof(k1::dtype), hipMemcpyHostToDevice));
         gpuErrchk(hipDeviceSynchronize());
+#endif // DISABLE_K1_PLANS
     }
 
 
@@ -181,7 +188,9 @@ int main(int argc, char **argv) {
     // e.g, if 100/90/80/70 chunks allocated to hbm0 in datas 0/1/2/3, k2_d_chunks_per_hbm_count[0] = 70
     vector<size_t> k2_min_num_chunks_over_n_datas(HBM_NUM);
     size_t k2_profile_iters = -1;
-    { 
+    {
+#if !(DISABLE_K2_PLANS)
+
 #if (FAST)
         const long long k2_n_pages = 512; // set 1024MB per input data, for faster debugging
 #else
@@ -248,6 +257,8 @@ int main(int argc, char **argv) {
 #else
         k2_profile_iters = max(*min_element(k2_min_num_chunks_over_n_datas.begin(), k2_min_num_chunks_over_n_datas.end()), (size_t)100000);
 #endif
+
+#endif // DISABLE_K2_PLANS
     }
 
     // =============================================================================================
@@ -259,7 +270,10 @@ int main(int argc, char **argv) {
     ppnt::PingSpec *d_plan;
     ppnt::PingOut  *d_out;
 
+#if !(DISABLE_K1_PLANS)
     // --- Add Latency Plans ---
+
+#if !(FAST)
     for (int x = 0; x < XCD_NUM; x++) {
         for (int v = 0; v < HBM_NUM; v++) {
             ppnt::PingSpec p;
@@ -268,22 +282,97 @@ int main(int argc, char **argv) {
             p.src_xcd = x;
             p.dst_hbm = v;
             p.iters   = k1_profile_iters; 
+            p.bpx     = 1;
             p.data    = k1_dbuf_start_ptrs_per_hbm[p.dst_hbm];
             p.dummy   = k1_dummy_buf; 
             h_plan.push_back(p);
 
             ppnt::PingOut o;
-            o.ping_id = p.ping_id;
-            o.kind    = p.kind;
-            o.src_xcd = p.src_xcd;
-            o.dst_hbm = p.dst_hbm;
-            o.iters   = p.iters;
-            gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * o.iters ));
+            gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * p.iters * p.bpx));
             h_out.push_back(o);
         }
     }
+#else
+    // Just a few latency plans for fast debugging
+    // Specifically, src_xcd = 0 to dst_hbm = 0,2,4,6
 
+    {
+        ppnt::PingSpec p;
+        p.ping_id = (int)h_plan.size();
+        p.kind    = ppnt::PingKind::Latency;
+        p.src_xcd = 0;
+        p.dst_hbm = 0;
+        p.iters   = k1_profile_iters; 
+        printf("p.iters: %zu\n", p.iters);
+        p.bpx     = 1;
+        p.data    = k1_dbuf_start_ptrs_per_hbm[p.dst_hbm];
+        p.dummy   = k1_dummy_buf; 
+        h_plan.push_back(p);
+
+        ppnt::PingOut o;
+        gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * p.iters * p.bpx));
+        h_out.push_back(o);
+    }
+
+    {
+        ppnt::PingSpec p;
+        p.ping_id = (int)h_plan.size();
+        p.kind    = ppnt::PingKind::Latency;
+        p.src_xcd = 0;
+        p.dst_hbm = 2;
+        p.iters   = k1_profile_iters; 
+        p.bpx     = 1;
+        p.data    = k1_dbuf_start_ptrs_per_hbm[p.dst_hbm];
+        p.dummy   = k1_dummy_buf; 
+        h_plan.push_back(p);
+
+        ppnt::PingOut o;
+        gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * p.iters * p.bpx));
+        h_out.push_back(o);
+    }
+
+    {
+        ppnt::PingSpec p;
+        p.ping_id = (int)h_plan.size();
+        p.kind    = ppnt::PingKind::Latency;
+        p.src_xcd = 0;
+        p.dst_hbm = 4;
+        p.iters   = k1_profile_iters; 
+        p.bpx     = 1;
+        p.data    = k1_dbuf_start_ptrs_per_hbm[p.dst_hbm];
+        p.dummy   = k1_dummy_buf; 
+        h_plan.push_back(p);
+
+        ppnt::PingOut o;
+        gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * p.iters * p.bpx));
+        h_out.push_back(o);
+    }
+
+    {
+        ppnt::PingSpec p;
+        p.ping_id = (int)h_plan.size();
+        p.kind    = ppnt::PingKind::Latency;
+        p.src_xcd = 0;
+        p.dst_hbm = 6;
+        p.iters   = k1_profile_iters; 
+        p.bpx     = 1;
+        p.data    = k1_dbuf_start_ptrs_per_hbm[p.dst_hbm];
+        p.dummy   = k1_dummy_buf; 
+        h_plan.push_back(p);
+
+        ppnt::PingOut o;
+        gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * p.iters * p.bpx));
+        h_out.push_back(o);
+    }
+
+#endif // !(FAST)
+
+#endif // !DISABLE_K1_PLANS 
+
+#if !(DISABLE_K2_PLANS)
     // --- Add Bandwidth Plans ---
+
+#if !(FAST)
     for (int x = 0; x < XCD_NUM; x++) {
         for (int v = 0; v < HBM_NUM; v++) {
             ppnt::PingSpec p;
@@ -292,6 +381,7 @@ int main(int argc, char **argv) {
             p.src_xcd         = 0;
             p.dst_hbm         = 0;
             p.iters           = k2_profile_iters; 
+            p.bpx             = 1;
             p.data_bytes      = CHUNK_SIZE * k2_min_num_chunks_over_n_datas[p.dst_hbm]; // per data
             p.data0           = k2_d_chunks_per_hbm[0] + k2_h_offsets[0][p.dst_hbm];
             p.data1           = k2_d_chunks_per_hbm[1] + k2_h_offsets[1][p.dst_hbm];
@@ -303,23 +393,118 @@ int main(int argc, char **argv) {
             gpuErrchk(hipMalloc(&p.sink, sizeof(float) * (TARGET_BLOCKDIM_X * XCD_NUM))); 
             h_plan.push_back(p);
 
-            // -- Add Bandwidth Out ---
             ppnt::PingOut o;
-            o.ping_id = p.ping_id;
-            o.kind    = p.kind;
-            o.src_xcd = p.src_xcd;
-            o.dst_hbm = p.dst_hbm;
-            o.iters   = p.iters;
-    #if 1
-            gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * o.iters ));
-    #else
-            const int k2_bpx = 1; // TODO: set to a proper value that saturates bw
-            gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * o.iters * k2_bpx)); // each k2_bpx writes one clk value per-iteration
-    #endif
+            gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * p.iters * p.bpx));
             h_out.push_back(o);
 
         }
     }
+#else
+    // Just a few bandwidth plans for fast debugging
+    // Specifically, src_xcd = 0 to dst_hbm = 0,2 and bpx = 2,4,8,16
+
+    {
+        ppnt::PingSpec p;
+        p.ping_id         = (int)h_plan.size(); // auto increments
+        p.kind            = ppnt::PingKind::Bandwidth;
+        p.src_xcd         = 0;
+        p.dst_hbm         = 0;
+        p.iters           = k2_profile_iters; 
+        p.bpx             = 2;
+        p.data_bytes      = CHUNK_SIZE * k2_min_num_chunks_over_n_datas[p.dst_hbm]; // per data
+        p.data0           = k2_d_chunks_per_hbm[0] + k2_h_offsets[0][p.dst_hbm];
+        p.data1           = k2_d_chunks_per_hbm[1] + k2_h_offsets[1][p.dst_hbm];
+        p.data2           = k2_d_chunks_per_hbm[2] + k2_h_offsets[2][p.dst_hbm];
+        p.data3           = k2_d_chunks_per_hbm[3] + k2_h_offsets[3][p.dst_hbm];
+        // Note (01/28/25) This will definitely lead to OOB if k2_bpx > 1. Must modify the current implementation of 
+        // having `XCD_NUM` as a substitute for real gridDim.x of the k2 profiler kernel
+        // TODO: fix!!
+        gpuErrchk(hipMalloc(&p.sink, sizeof(float) * (TARGET_BLOCKDIM_X * XCD_NUM))); 
+        h_plan.push_back(p);
+
+        ppnt::PingOut o;
+        gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * p.iters * p.bpx));
+        h_out.push_back(o);
+
+    }
+
+    {
+        ppnt::PingSpec p;
+        p.ping_id         = (int)h_plan.size(); // auto increments
+        p.kind            = ppnt::PingKind::Bandwidth;
+        p.src_xcd         = 0;
+        p.dst_hbm         = 0;
+        p.iters           = k2_profile_iters; 
+        p.bpx             = 4;
+        p.data_bytes      = CHUNK_SIZE * k2_min_num_chunks_over_n_datas[p.dst_hbm]; // per data
+        p.data0           = k2_d_chunks_per_hbm[0] + k2_h_offsets[0][p.dst_hbm];
+        p.data1           = k2_d_chunks_per_hbm[1] + k2_h_offsets[1][p.dst_hbm];
+        p.data2           = k2_d_chunks_per_hbm[2] + k2_h_offsets[2][p.dst_hbm];
+        p.data3           = k2_d_chunks_per_hbm[3] + k2_h_offsets[3][p.dst_hbm];
+        // Note (01/28/25) This will definitely lead to OOB if k2_bpx > 1. Must modify the current implementation of 
+        // having `XCD_NUM` as a substitute for real gridDim.x of the k2 profiler kernel
+        // TODO: fix!!
+        gpuErrchk(hipMalloc(&p.sink, sizeof(float) * (TARGET_BLOCKDIM_X * XCD_NUM))); 
+        h_plan.push_back(p);
+
+        ppnt::PingOut o;
+        gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * p.iters * p.bpx));
+        h_out.push_back(o);
+
+    }
+
+    {
+        ppnt::PingSpec p;
+        p.ping_id         = (int)h_plan.size(); // auto increments
+        p.kind            = ppnt::PingKind::Bandwidth;
+        p.src_xcd         = 0;
+        p.dst_hbm         = 0;
+        p.iters           = k2_profile_iters; 
+        p.bpx             = 8;
+        p.data_bytes      = CHUNK_SIZE * k2_min_num_chunks_over_n_datas[p.dst_hbm]; // per data
+        p.data0           = k2_d_chunks_per_hbm[0] + k2_h_offsets[0][p.dst_hbm];
+        p.data1           = k2_d_chunks_per_hbm[1] + k2_h_offsets[1][p.dst_hbm];
+        p.data2           = k2_d_chunks_per_hbm[2] + k2_h_offsets[2][p.dst_hbm];
+        p.data3           = k2_d_chunks_per_hbm[3] + k2_h_offsets[3][p.dst_hbm];
+        // Note (01/28/25) This will definitely lead to OOB if k2_bpx > 1. Must modify the current implementation of 
+        // having `XCD_NUM` as a substitute for real gridDim.x of the k2 profiler kernel
+        // TODO: fix!!
+        gpuErrchk(hipMalloc(&p.sink, sizeof(float) * (TARGET_BLOCKDIM_X * XCD_NUM))); 
+        h_plan.push_back(p);
+
+        ppnt::PingOut o;
+        gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * p.iters * p.bpx));
+        h_out.push_back(o);
+
+    }
+
+    {
+        ppnt::PingSpec p;
+        p.ping_id         = (int)h_plan.size(); // auto increments
+        p.kind            = ppnt::PingKind::Bandwidth;
+        p.src_xcd         = 0;
+        p.dst_hbm         = 0;
+        p.iters           = k2_profile_iters;
+        p.bpx             = 16; 
+        p.data_bytes      = CHUNK_SIZE * k2_min_num_chunks_over_n_datas[p.dst_hbm]; // per data
+        p.data0           = k2_d_chunks_per_hbm[0] + k2_h_offsets[0][p.dst_hbm];
+        p.data1           = k2_d_chunks_per_hbm[1] + k2_h_offsets[1][p.dst_hbm];
+        p.data2           = k2_d_chunks_per_hbm[2] + k2_h_offsets[2][p.dst_hbm];
+        p.data3           = k2_d_chunks_per_hbm[3] + k2_h_offsets[3][p.dst_hbm];
+        // Note (01/28/25) This will definitely lead to OOB if k2_bpx > 1. Must modify the current implementation of 
+        // having `XCD_NUM` as a substitute for real gridDim.x of the k2 profiler kernel
+        // TODO: fix!!
+        gpuErrchk(hipMalloc(&p.sink, sizeof(float) * (TARGET_BLOCKDIM_X * XCD_NUM))); 
+        h_plan.push_back(p);
+
+        ppnt::PingOut o;
+        gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * p.iters * p.bpx));
+        h_out.push_back(o);
+    }
+
+#endif // !(FAST)
+
+#endif // !DISABLE_K2_PLANS
 
     // Copy plan/out to device
     size_t n_plan = h_plan.size();
@@ -358,7 +543,15 @@ int main(int argc, char **argv) {
     int physical_grid_size;
     {
         const int num_sms = CU_NUM * XCD_NUM;
+#if 0
         const int max_blocks_per_sm = 2;
+#else
+        // TODO: Each CU can host up to 2K threads, which is 2 blocks. However, this often leads to
+        // profiling TB and target TBs being scheduled on the same CU, causing interference. Thus, 
+        // we limit to 1 block per SM for more consistent profiling results. 
+        // This should be revisited, potentially leverage CU mask to isolate profiling "CUs" for target.
+        const int max_blocks_per_sm = 1;
+#endif
         const int target_physical_blocks = max_blocks_per_sm * num_sms;
         
         // Round down to nearest multiple of XCD_NUM
@@ -462,7 +655,7 @@ int main(int argc, char **argv) {
             (void*)ppnt::fused_kernel<AttnQKVTargetFn, AttnQKVArgs>,
             dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
         gpuErrchk(hipStreamSynchronize(stream));
-        ppnt::parse_pingouts(d_out, n_plan, TARGET_BLOCKDIM_X, clock);
+        ppnt::parse_pingouts(d_plan, d_out, n_plan, TARGET_BLOCKDIM_X, clock);
     }
 
     // 2. ATTENTION LAYER: Output Projection (QKV -> AttnOut)
@@ -482,26 +675,26 @@ int main(int argc, char **argv) {
             (void*)ppnt::fused_kernel<AttnOutTargetFn, AttnOutArgs>,
             dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
         gpuErrchk(hipStreamSynchronize(stream));
-        ppnt::parse_pingouts(d_out, n_plan, TARGET_BLOCKDIM_X, clock);
+        ppnt::parse_pingouts(d_plan, d_out, n_plan, TARGET_BLOCKDIM_X, clock);
     }
 
-    // 3. MOE: Dispatch (AttnOut -> Xexp)
+    // 3. MOE: Scatter (AttnOut -> Xexp)
     { 
 #if DEBUG_LEVEL >= 1
-        cout << "\n\nDISPATCH" << "\n" << flush;
+        cout << "\n\nSCATTER" << "\n" << flush;
 #endif
         // Explicitly defining input for clarity
         float* d_moe_input = d_AttnOut; 
 
-        DispatchArgs h_args = {d_moe_input, d_eid, d_Xexp, d_pos, d_cnt, T, d, E, cap};
-        DispatchArgs* d_args = nullptr;
-        gpuErrchk(hipMalloc(&d_args, sizeof(DispatchArgs)));
-        gpuErrchk(hipMemcpyAsync(d_args, &h_args, sizeof(DispatchArgs), hipMemcpyHostToDevice, stream));
+        ScatterArgs h_args = {d_moe_input, d_eid, d_Xexp, d_pos, d_cnt, T, d, E, cap};
+        ScatterArgs* d_args = nullptr;
+        gpuErrchk(hipMalloc(&d_args, sizeof(ScatterArgs)));
+        gpuErrchk(hipMemcpyAsync(d_args, &h_args, sizeof(ScatterArgs), hipMemcpyHostToDevice, stream));
 
-        DispatchTargetFn fn{};
+        ScatterTargetFn fn{};
         void* kernelArgs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&n_plan, (void*)&d_out };
 
-        // Note: Dispatch uses a calculated grid based on T, plus 1 profile block per XCD
+        // Note: Scatter uses a calculated grid based on T, plus 1 profile block per XCD
         dim3 target_blockD(TARGET_BLOCKDIM_X);
         dim3 profile_blockD(1024);
         dim3 blockD(max(target_blockD.x, profile_blockD.x));
@@ -510,16 +703,16 @@ int main(int argc, char **argv) {
         dim3 gridD(target_gridD.x + profile_gridD.x);
 
         gpuErrchk(hipLaunchCooperativeKernel(
-            (void*)ppnt::fused_kernel<DispatchTargetFn, DispatchArgs>,
+            (void*)ppnt::fused_kernel<ScatterTargetFn, ScatterArgs>,
             dim3(gridD), dim3(blockD), kernelArgs, 0, stream));
         gpuErrchk(hipStreamSynchronize(stream));
-        ppnt::parse_pingouts(d_out, n_plan, TARGET_BLOCKDIM_X, clock);
+        ppnt::parse_pingouts(d_plan, d_out, n_plan, TARGET_BLOCKDIM_X, clock);
     }
 
     // 4. MOE: FFN1 (Xexp -> Tmp)
     { 
 #if DEBUG_LEVEL >= 1
-        cout << "FFN1" << "\n" << flush;
+        cout << "\n\nFFN1" << "\n" << flush;
 #endif
         Gemm1Args h_args = {d_Xexp, d_W1, d_Tmp, d_cnt, E, cap, d, hidden};
         Gemm1Args* d_args = nullptr;
@@ -533,7 +726,7 @@ int main(int argc, char **argv) {
             (void*)ppnt::fused_kernel<Gemm1TargetFn, Gemm1Args>,
             dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
         gpuErrchk(hipStreamSynchronize(stream));
-        ppnt::parse_pingouts(d_out, n_plan, TARGET_BLOCKDIM_X, clock);
+        ppnt::parse_pingouts(d_plan, d_out, n_plan, TARGET_BLOCKDIM_X, clock);
     }
 
     // 5. MOE: ReLU (Tmp -> Tmp)
@@ -553,13 +746,13 @@ int main(int argc, char **argv) {
             (void*)ppnt::fused_kernel<ReluTargetFn, ReluArgs>,
             dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
         gpuErrchk(hipStreamSynchronize(stream));
-        ppnt::parse_pingouts(d_out, n_plan, TARGET_BLOCKDIM_X, clock);
+        ppnt::parse_pingouts(d_plan, d_out, n_plan, TARGET_BLOCKDIM_X, clock);
     }
 
     // 6. MOE: FFN2 (Tmp -> Yexp)
     { 
 #if DEBUG_LEVEL >= 1
-        cout << "FFN2" << "\n" << flush;
+        cout << "\n\nFFN2" << "\n" << flush;
 #endif
         Gemm2Args h_args = {d_Tmp, d_W2, d_Yexp, d_cnt, E, cap, d, hidden};
         Gemm2Args* d_args = nullptr;
@@ -573,7 +766,7 @@ int main(int argc, char **argv) {
             (void*)ppnt::fused_kernel<Gemm2TargetFn, Gemm2Args>,
             dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
         gpuErrchk(hipStreamSynchronize(stream));
-        ppnt::parse_pingouts(d_out, n_plan, TARGET_BLOCKDIM_X, clock);
+        ppnt::parse_pingouts(d_plan, d_out, n_plan, TARGET_BLOCKDIM_X, clock);
     }
 
     // 7. MOE: Gather (Yexp -> Y)
@@ -593,7 +786,7 @@ int main(int argc, char **argv) {
             (void*)ppnt::fused_kernel<GatherTargetFn, GatherArgs>,
             dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
         gpuErrchk(hipStreamSynchronize(stream));
-        ppnt::parse_pingouts(d_out, n_plan, TARGET_BLOCKDIM_X, clock);
+        ppnt::parse_pingouts(d_plan, d_out, n_plan, TARGET_BLOCKDIM_X, clock);
     }
 
     // Cleanup resources here if needed (omitted for brevity)

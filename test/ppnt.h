@@ -3,13 +3,14 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_cooperative_groups.h>
 
+#include <cassert>
+
 #include "main.h"
 #include "k1.h"
 #include "k2.h"
 
 namespace cg = cooperative_groups;
 
-#define PPNT_TBID_IN_XCD 0 // ppnt thread block id within xcd
 #define DEBUG_PPNT_LEVEL 0
 
 namespace ppnt {
@@ -22,7 +23,7 @@ struct PingSpec {
     uint16_t src_xcd;
     uint16_t dst_hbm;
     size_t iters;
-    size_t data_bytes;
+    size_t bpx; // number of "ping" prof blocks per xcd
     // only for k1
     k1::dtype *data;
     k1::dtype *dummy; // to avoid compiler optimization
@@ -32,32 +33,30 @@ struct PingSpec {
     uint64_t *data2; 
     uint64_t *data3;
     float *sink;
+    size_t data_bytes; // unused, but keep for later
 };
 
 struct PingOut {
-    uint16_t ping_id;
-    PingKind kind;
-    uint16_t src_xcd;
-    uint16_t dst_hbm;
-    size_t iters;
     uint64_t *iterClk; 
 };
 
 __device__ __forceinline__
-int physical_to_logical_bid_skip_one(int bid, int n_tbs_in_xcd, int ppnt_tbid_in_xcd) {
-    // bid layout assumed interleaved by XCD: bid % XCD_NUM gives "xcd lane"
-    // tbid_in_xcd is computed as (bid / XCD_NUM) % n_tbs_in_xcd in your code.
-
-    int xcd_lane   = bid % XCD_NUM;
+int physical_to_logical_bid(int bid, int n_tbs_in_xcd, int ppnt_bpx) {
+    // 1. Identify XCD lane and local index
+    int xcd_lane    = bid % XCD_NUM;
     int tbid_in_xcd = (bid / XCD_NUM) % n_tbs_in_xcd;
 
-    // If this is the profiling TB, caller should not request a logical id.
-    // Compute how many target TBs are before this TB within the same XCD lane:
-    int before = tbid_in_xcd;
-    if (tbid_in_xcd > ppnt_tbid_in_xcd) before -= 1; // skip the reserved profiling slot
+    // 2. Compute Logical ID
+    // Since the first `ppnt_bpx` blocks are reserved, the logical ID for the target
+    // starts at 0 when tbid_in_xcd == ppnt_bpx.
+    // (Caller must guarantee tbid_in_xcd >= ppnt_bpx)
+    int logical_tbid_local = tbid_in_xcd - ppnt_bpx;
 
-    int target_tbs_per_xcd = n_tbs_in_xcd - 1;
-    return xcd_lane * target_tbs_per_xcd + before;
+    // 3. Compute Global Linear ID
+    // Each XCD contributes (n - ppnt_bpx) blocks to the logical grid.
+    int target_tbs_per_xcd = n_tbs_in_xcd - ppnt_bpx;
+
+    return xcd_lane * target_tbs_per_xcd + logical_tbid_local;
 }
 
 template <typename TargetFn, typename TargetArgs>
@@ -79,44 +78,41 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
     asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID, 13, 3)" : "=r"(se_id));
     asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=r"(xcc_id));
 
-    if (tbid_in_xcd == PPNT_TBID_IN_XCD) { // TODO: bw will require multi tbs for profile
-        /* Run profiling */
+    for (int i = 0; i < N_plan; i++) {
+        // Synchronize the coop grid before each ping/replay (#1)
+        grid.sync();
 
-#if DEBUG_PPNT_LEVEL >= 1
-        if (tid == 0) {
-            printf("[profile] bid %d: (xcc_id: %u, se_id: %u, cu_id: %u)\n", \
-                bid, xcc_id, se_id, cu_id);
+        const PingSpec& spec = plan[i];
+#if DEBUG_PPNT_LEVEL >= 0
+        if (bid == 0 && tid == 0) {
+            printf("spec[%d]: ping_id=%d, kind=%d, src_xcd=%d, dst_hbm=%d, iters=%zu, bpx=%zu\n", \
+                i, spec.ping_id, (int)spec.kind, spec.src_xcd, spec.dst_hbm, spec.iters, spec.bpx);
         }
 #endif
 
-        for (int i = 0; i < N_plan; i++) {
-            // Synchronize the coop grid before each ping/replay (#1)
-            grid.sync();
+        if (tbid_in_xcd < spec.bpx) {
+            /* Run profiling */
 
-            const PingSpec& spec = plan[i];
 #if DEBUG_PPNT_LEVEL >= 1
-            if (bid == 0 && tid == 0) {
-                printf("spec[%d]: ping_id=%d, kind=%d, src_xcd=%d, dst_hbm=%d, iters=%zu, data_bytes=%zu, data0=%p\n", \
-                    i, spec.ping_id, (int)spec.kind, spec.src_xcd, spec.dst_hbm, spec.iters, spec.data_bytes, spec.data0);
+            if (tid == 0) {
+                printf("[profile] bid %d: (xcc_id: %u, se_id: %u, cu_id: %u)\n", \
+                    bid, xcc_id, se_id, cu_id);
             }
 #endif
 
             if (spec.src_xcd != xcc_id) continue; // not my ping
-            if (spec.kind == PingKind::Latency) {
+
+            if (spec.kind == PingKind::Latency) 
+            {
                 if (tid != 0) continue; // only thread 0 runs latency ping
-#if DEBUG_PPNT_LEVEL >= 1
-                printf("(bid:%d,tid:%d) running k1 ping (id: %d)\n", bid, tid, spec.ping_id);
-#endif
                 k1::k<k1::dtype>(
                     spec.data, spec.dummy, spec.iters,
                     /* Pingout */
                     out[i].iterClk
                 );
-                // TODO: write results
-            } else if (spec.kind == PingKind::Bandwidth) {
-#if DEBUG_PPNT_LEVEL >= 1
-                if (tid == 0) printf("(bid:%d) running k2 ping (id: %d)\n", bid, spec.ping_id);
-#endif
+            } 
+            else if (spec.kind == PingKind::Bandwidth) 
+            {
                 const int k2_chunk_size = CHUNK_SIZE;
                 k2::k(
                     spec.data0, spec.data1,
@@ -126,81 +122,81 @@ __global__ void fused_kernel(TargetFn target_fn, const TargetArgs* __restrict__ 
                     /* Pingout */
                     out[i].iterClk
                 );
-                // TODO: write results
-            } else { 
+            } 
+            else 
+            { 
                 // unknown ping kind
 #if DEBUG_PPNT_LEVEL >= 1
-                if (tid == 0) printf("(bid:%d) unknown ping kind %d (id: %d)\n", bid, (int)spec.kind, spec.ping_id);
+                if (tid == 0) printf("unknown ping kind\n");
                 return;
 #endif
             }
-            
-        }
 
-    } else {
-        /* Run target fn */
-        
+        } else {
+            /* Run target fn */
+
 #if DEBUG_PPNT_LEVEL >= 1
-        if (tid == 0) {
-            printf("[target] bid %d: (xcc_id: %u, se_id: %u, cu_id: %u)\n", \
-                bid, xcc_id, se_id, cu_id);
-        }
+            if (tid == 0) {
+                printf("[target] bid %d: (xcc_id: %u, se_id: %u, cu_id: %u)\n", \
+                    bid, xcc_id, se_id, cu_id);
+            }
 #endif
 
-#if 0
-        target_fn(targs, bid, tid, gridDim.x, blockDim.x);
-#else
-        // Target kernel replay N_plan times for profiling...
-        for (int i = 0; i < N_plan; i++) {
-            // Synchronize the coop grid before each ping/replay (#1)
-            grid.sync();
-            
-            target_fn(targs, bid, tid, gridDim.x, blockDim.x);
+            target_fn(targs, bid, tid, gridDim.x, blockDim.x, spec.bpx);
         }
-#endif
+
     }
 }
 
-void parse_pingouts(PingOut* d_out, const size_t n_plan, const size_t blockD_x, const size_t clock) {
+void parse_pingouts(PingSpec* d_plan, PingOut* d_out, const size_t n_plan, const size_t blockD_x, const size_t clock) {
 
     // Check PingOut results
     // TODO: temporarily done here, move to end of main later on.
     for (size_t i = 0; i < n_plan; i++) {
-        ppnt::PingOut o;
-        gpuErrchk(hipMemcpy(&o, &d_out[i], sizeof(ppnt::PingOut), hipMemcpyDeviceToHost));
+        PingSpec p;
+        PingOut o;
+        gpuErrchk(hipMemcpy(&p, &d_plan[i], sizeof(PingSpec), hipMemcpyDeviceToHost));
+        gpuErrchk(hipMemcpy(&o, &d_out[i], sizeof(PingOut), hipMemcpyDeviceToHost));
 
         // Copy per-iteration clock data to host
-        // TODO: this may also need to change when k2_bpx > 1
-        vector<uint64_t> h_iterClk(o.iters);
-        gpuErrchk(hipMemcpy(h_iterClk.data(), o.iterClk, sizeof(uint64_t) * o.iters, hipMemcpyDeviceToHost));
+        size_t n = p.iters * p.bpx;
+        vector<uint64_t> h_iterClk(n);
+#if DEBUG_PPNT_LEVEL >= 1
+        cout << "[PPNT] Parsing pingout id=" << i << " (kind=" 
+             << ((p.kind == ppnt::PingKind::Latency) ? "Latency" : "Bandwidth") << ")"
+             << p.iters << " iters " << p.bpx << " bpx"
+             << "\n"
+             << flush;
+#endif
+        gpuErrchk(hipMemcpy(h_iterClk.data(), o.iterClk, sizeof(uint64_t) * n, hipMemcpyDeviceToHost));
 
         // Compute average cycles per iteration
         MeasurementSeries cycles;
-        for (size_t it = 0; it < o.iters; it++) {
+        for (size_t it = 0; it < n; it++) {
             cycles.add(h_iterClk[it]);
-#if DEBUG_LEVEL >= 3
-            cout << "[PPNT] Ping id=" << i << " iter=" << it << " cycles=" << h_iterClk[it] << "\n" << flush;
-#endif
         }
+        
         // 1e3 as clock in MHz
         const double dt_mean = cycles.value(); const double ns_mean = dt_mean / (double)clock * 1e3;
         const double dt_max  = cycles.getPercentile(0.9); const double ns_max  = dt_max  / (double)clock * 1e3;
 
         // Compute bandwidth for Bandwidth pings
         string bw_str = "N/A"; // in GB/s
-        if (o.kind == ppnt::PingKind::Bandwidth) {
+        if (p.kind == ppnt::PingKind::Bandwidth) {
             const size_t k2_n_datas = 4; // k2 uses 4 data pointers
-            size_t iter_bytes = blockD_x * k2_n_datas * 16;
+            size_t bytes_per_block = blockD_x * k2_n_datas * 16;
+            size_t iter_bytes = bytes_per_block * p.bpx; // Account for multiple blocks (bpx) running in parallel
             double bw_gbps = ((double)iter_bytes / (ns_mean)) ; // GB/s
             bw_str = to_string(bw_gbps);
         }
 
         // Report
         cout << "[PPNT] Ping id=" << setw(2) << i << " "
-                << "kind=" << ((o.kind == ppnt::PingKind::Latency) ? "Latency" : "Bandwidth") << " "
-                << "src_xcd=" << setw(1) << o.src_xcd << " "
-                << "dst_hbm=" << setw(1) << o.dst_hbm << " "
-                << "iters=" << setw(8) << o.iters << " "
+                << "kind=" << ((p.kind == ppnt::PingKind::Latency) ? "Latency" : "Bandwidth") << " "
+                << "src_xcd=" << setw(1) << p.src_xcd << " "
+                << "dst_hbm=" << setw(1) << p.dst_hbm << " "
+                << "iters=" << setw(8) << p.iters << " "
+                << "bpx=" << setw(2) << p.bpx << " "
                 << fixed << setprecision(1)
                 << "mean_ns=" << setw(3) << ns_mean << " "
                 << "p90_ns=" << setw(3) << ns_max << " "
