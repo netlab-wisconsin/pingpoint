@@ -21,10 +21,13 @@ K2_BPX_MAX := 80
 K2_TPB := 1024
 
 SUFFIX := run
+# SUFFIX := notgt
 
-all: $(BIN_DIR)/moe #$(BIN_DIR)/attn
+TARGET := $(BIN_DIR)/moe_$(SUFFIX)
 
-$(BIN_DIR)/moe: moe.cpp moe.h ppnt.h main.h k1.h k2.h
+all: $(TARGET)
+
+$(TARGET): moe.cpp moe.h ppnt.h main.h k1.h k2.h
 	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) \
 	-o $@ $<
 
@@ -32,5 +35,5 @@ $(BIN_DIR)/moe: moe.cpp moe.h ppnt.h main.h k1.h k2.h
 # 	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) \
 # 	-o $@ $<
 
-# clean: 
-# 	rm -f $(TARGETS)
+clean: 
+	rm -f $(TARGET)

@@ -337,7 +337,11 @@ __device__ void k(
 #if DEBUG_K2_KERNEL
             printf("k2 iter %ld tbid_in_xcd %d chunk_idx %zu: %lu cycles\n", i, tbid_in_xcd, chunk_idx, end - start);
 #endif
-            po_iterClk[i] = end - start;
+            // (Note 01/30/26) assume first bpx blocks are profiling blocks
+            // Every ping activates a single source XCD. So, if I mistake tbid_in_xcd with bid,
+            // it will lead to illegal memory access in the below line.
+            // Allocation of iterClk at moe.cpp and ppnt::parse_pingouts() are directly related to this.
+            po_iterClk[(tbid_in_xcd * k2_N) + i] = end - start;
         }
 
         sink0 += reg_in1.x + reg_in2.x + reg_in3.x + reg_in4.x;
