@@ -402,8 +402,8 @@ int main(int argc, char **argv) {
                 ppnt::PingSpec p;
                 p.ping_id         = (int)h_plan.size(); // auto increments
                 p.kind            = ppnt::PingKind::Bandwidth;
-                p.src_xcd         = 0;
-                p.dst_hbm         = 0;
+                p.src_xcd         = x;
+                p.dst_hbm         = v;
                 p.iters           = k2_profile_iters; 
                 p.bpx             = bpx;
                 p.data_bytes      = CHUNK_SIZE * k2_min_num_chunks_over_n_datas[p.dst_hbm]; // per data
