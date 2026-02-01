@@ -21,6 +21,7 @@
 
 #define DEBUG_LEVEL 1 // 0: MoE, 1: PPNT, 2+: Misc
 #define FAST 1 // set for faster debugging, set 0 for actual measurement
+#define PPNT_PLAN_SELECTED_ONLY 0 // set to only generate selected plans
 
 using namespace std;
 
@@ -296,7 +297,7 @@ int main(int argc, char **argv) {
 #if !(DISABLE_K1_PLANS)
     // --- Add Latency Plans ---
 
-#if !(FAST)
+#if !(PPNT_PLAN_SELECTED_ONLY)
     for (int x = 0; x < XCD_NUM; x++) {
         for (int v = 0; v < HBM_NUM; v++) {
             ppnt::PingSpec p;
@@ -387,38 +388,39 @@ int main(int argc, char **argv) {
         h_out.push_back(o);
     }
 
-#endif // !(FAST)
+#endif // !(PPNT_PLAN_SELECTED_ONLY)
 
 #endif // !DISABLE_K1_PLANS 
 
 #if !(DISABLE_K2_PLANS)
     // --- Add Bandwidth Plans ---
 
-#if !(FAST)
+#if !(PPNT_PLAN_SELECTED_ONLY)
     for (int x = 0; x < XCD_NUM; x++) {
         for (int v = 0; v < HBM_NUM; v++) {
-            ppnt::PingSpec p;
-            p.ping_id         = (int)h_plan.size(); // auto increments
-            p.kind            = ppnt::PingKind::Bandwidth;
-            p.src_xcd         = 0;
-            p.dst_hbm         = 0;
-            p.iters           = k2_profile_iters; 
-            p.bpx             = 1;
-            p.data_bytes      = CHUNK_SIZE * k2_min_num_chunks_over_n_datas[p.dst_hbm]; // per data
-            p.data0           = k2_d_chunks_per_hbm[0] + k2_h_offsets[0][p.dst_hbm];
-            p.data1           = k2_d_chunks_per_hbm[1] + k2_h_offsets[1][p.dst_hbm];
-            p.data2           = k2_d_chunks_per_hbm[2] + k2_h_offsets[2][p.dst_hbm];
-            p.data3           = k2_d_chunks_per_hbm[3] + k2_h_offsets[3][p.dst_hbm];
-            // Note (01/28/25) This will definitely lead to OOB if k2_bpx > 1. Must modify the current implementation of 
-            // having `XCD_NUM` as a substitute for real gridDim.x of the k2 profiler kernel
-            // TODO: fix!!
-            gpuErrchk(hipMalloc(&p.sink, sizeof(float) * (TARGET_BLOCKDIM_X * XCD_NUM))); 
-            h_plan.push_back(p);
+            for (int bpx : {1,2,4,8,16}) {
+                ppnt::PingSpec p;
+                p.ping_id         = (int)h_plan.size(); // auto increments
+                p.kind            = ppnt::PingKind::Bandwidth;
+                p.src_xcd         = 0;
+                p.dst_hbm         = 0;
+                p.iters           = k2_profile_iters; 
+                p.bpx             = bpx;
+                p.data_bytes      = CHUNK_SIZE * k2_min_num_chunks_over_n_datas[p.dst_hbm]; // per data
+                p.data0           = k2_d_chunks_per_hbm[0] + k2_h_offsets[0][p.dst_hbm];
+                p.data1           = k2_d_chunks_per_hbm[1] + k2_h_offsets[1][p.dst_hbm];
+                p.data2           = k2_d_chunks_per_hbm[2] + k2_h_offsets[2][p.dst_hbm];
+                p.data3           = k2_d_chunks_per_hbm[3] + k2_h_offsets[3][p.dst_hbm];
+                // Note (01/28/25) This will definitely lead to OOB if k2_bpx > 1. Must modify the current implementation of 
+                // having `XCD_NUM` as a substitute for real gridDim.x of the k2 profiler kernel
+                // TODO: fix!!
+                gpuErrchk(hipMalloc(&p.sink, sizeof(float) * (TARGET_BLOCKDIM_X * XCD_NUM))); 
+                h_plan.push_back(p);
 
-            ppnt::PingOut o;
-            gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * p.iters * p.bpx));
-            h_out.push_back(o);
-
+                ppnt::PingOut o;
+                gpuErrchk(hipMalloc(&o.iterClk, sizeof(uint64_t) * p.iters * p.bpx));
+                h_out.push_back(o);
+            }
         }
     }
 #else
@@ -524,7 +526,7 @@ int main(int argc, char **argv) {
         h_out.push_back(o);
     }
 
-#endif // !(FAST)
+#endif // !(PPNT_PLAN_SELECTED_ONLY)
 
 #endif // !DISABLE_K2_PLANS
 
