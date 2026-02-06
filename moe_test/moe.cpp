@@ -30,13 +30,13 @@ using namespace std;
 #define DISABLE_K1_PLANS 0
 #define DISABLE_K2_PLANS 0
 
-#define PPNT_PROFILE_ATTENTION1 1
+#define PPNT_PROFILE_ATTENTION1 0 //
 #define PPNT_PROFILE_ATTENTION2 0
-#define PPNT_PROFILE_SCATTER    1
-#define PPNT_PROFILE_FFN1       1
+#define PPNT_PROFILE_SCATTER    0 //
+#define PPNT_PROFILE_FFN1       1 //
 #define PPNT_PROFILE_RELU       0        
 #define PPNT_PROFILE_FFN2       0
-#define PPNT_PROFILE_GATHER     1
+#define PPNT_PROFILE_GATHER     0 //
 
 
 int main(int argc, char **argv) {
@@ -298,7 +298,8 @@ int main(int argc, char **argv) {
     // --- Add Latency Plans ---
 
 #if !(PPNT_PLAN_SELECTED_ONLY)
-    for (int x = 0; x < XCD_NUM; x++) {
+    // for (int x = 0; x < XCD_NUM; x++) {
+    for (int x: {2,3,0,1,4,5,6,7}) {
         for (int v = 0; v < HBM_NUM; v++) {
             ppnt::PingSpec p;
             p.ping_id = (int)h_plan.size();
@@ -629,7 +630,7 @@ int main(int argc, char **argv) {
         float *h_X = (float*)malloc(sizeof(float) * (size_t)T * d);
         int   *h_eid = (int*)malloc(sizeof(int)   * (size_t)T);
         fill_random(h_X, (size_t)T * d);
-#if 0
+#if 1
         fill_expert_ids(h_eid, T, E);
 #else
         // Deterministic, exact counts per expert (90% to E0), for experimental reproducibility

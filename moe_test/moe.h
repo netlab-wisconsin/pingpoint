@@ -6,7 +6,7 @@
 #include <cstddef>
 #include <algorithm>
 
-#define IMBALANCED_DISTRIBUTION 1
+#define IMBALANCED_DISTRIBUTION 0
 
 #if IMBALANCED_DISTRIBUTION
 #define HOT_EXPERT_ID 0 // index of hot expert
@@ -46,40 +46,40 @@ static void fill_expert_ids(int* ids, size_t n, int E)
 }
 
 // deterministic version of fill_expert_ids with fixed 90% to hot expert
-static void fill_expert_ids_fixed(int* ids, size_t T, int E,
-                                  int hot_expert = HOT_EXPERT_ID,
-                                  double hot_frac = HOT_EXPERT_FRACTION)
-{
-    // Preconditions
-    if (!ids || T == 0 || E <= 0) return;
-    if (hot_expert < 0 || hot_expert >= E) hot_expert = 0;
-    hot_frac = std::clamp(hot_frac, 0.0, 1.0);
+// static void fill_expert_ids_fixed(int* ids, size_t T, int E,
+//                                   int hot_expert = HOT_EXPERT_ID,
+//                                   double hot_frac = HOT_EXPERT_FRACTION)
+// {
+//     // Preconditions
+//     if (!ids || T == 0 || E <= 0) return;
+//     if (hot_expert < 0 || hot_expert >= E) hot_expert = 0;
+//     hot_frac = std::clamp(hot_frac, 0.0, 1.0);
 
-    // Count assignment
-    size_t hot_cnt = static_cast<size_t>(hot_frac * static_cast<double>(T));
-    if (hot_cnt > T) hot_cnt = T;
+//     // Count assignment
+//     size_t hot_cnt = static_cast<size_t>(hot_frac * static_cast<double>(T));
+//     if (hot_cnt > T) hot_cnt = T;
 
-    size_t rem = T - hot_cnt;
+//     size_t rem = T - hot_cnt;
 
-    // Fill hot expert
-    for (size_t i = 0; i < hot_cnt; ++i) ids[i] = hot_expert;
+//     // Fill hot expert
+//     for (size_t i = 0; i < hot_cnt; ++i) ids[i] = hot_expert;
 
-    // Fill remaining experts uniformly over the leftover tokens
-    if (E == 1) return;  // all tokens already assigned to expert 0
+//     // Fill remaining experts uniformly over the leftover tokens
+//     if (E == 1) return;  // all tokens already assigned to expert 0
 
-    size_t n_other = static_cast<size_t>(E - 1);
-    size_t per = rem / n_other;
-    size_t extra = rem % n_other;   // first 'extra' experts get one more token
+//     size_t n_other = static_cast<size_t>(E - 1);
+//     size_t per = rem / n_other;
+//     size_t extra = rem % n_other;   // first 'extra' experts get one more token
 
-    size_t idx = hot_cnt;
-    for (int e = 0; e < E; ++e) {
-        if (e == hot_expert) continue;
-        size_t cnt = per + (extra ? 1 : 0);
-        if (extra) --extra;
+//     size_t idx = hot_cnt;
+//     for (int e = 0; e < E; ++e) {
+//         if (e == hot_expert) continue;
+//         size_t cnt = per + (extra ? 1 : 0);
+//         if (extra) --extra;
 
-        for (size_t k = 0; k < cnt; ++k) ids[idx++] = e;
-    }
-}
+//         for (size_t k = 0; k < cnt; ++k) ids[idx++] = e;
+//     }
+// }
 
 
 
