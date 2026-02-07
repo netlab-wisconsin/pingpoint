@@ -8,7 +8,7 @@ CCFLAGS 	:=
 INCLUDES 	:= -I$(HIP_HOME)/include/rocprofiler/ -I$(HIP_HOME)/hsa/include/hsa
 LDFLAGS 	:= -L$(HIP_HOME)/lib/rocprofiler -lrocprofiler64 -lhsa-runtime64 -lrocm_smi64 -ldl
 
-SUFFIX := interfere_hbm_order
+SUFFIX := interfere_bacK_hbm21
 
 TARGET := $(BIN_DIR)/moe_$(SUFFIX)
 

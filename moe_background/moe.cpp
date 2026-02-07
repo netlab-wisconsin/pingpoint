@@ -39,6 +39,8 @@ using namespace std;
 #define PPNT_PROFILE_FFN2       0
 #define PPNT_PROFILE_GATHER     1 //
 
+#define RUN_INTERFERER 1
+#define RUN_INTERFERER_AT_BACK 1
 
 int main(int argc, char **argv) {
 
@@ -683,6 +685,7 @@ int main(int argc, char **argv) {
     // INTERFERER SETUP
     // =============================================================================================
 
+#if RUN_INTERFERER 
     hipStream_t bg_stream;
     {
         int leastPrio = 0, greatestPrio = 0;
@@ -698,7 +701,9 @@ int main(int argc, char **argv) {
 
     int bg_blockdim = 1024;
     int bg_griddim = physical_grid_size; // same griddim to maximize interference
-
+#else
+    cout << "\n\n[BG] No interferer will be launched\n" << flush;
+#endif // RUN_INTERFERER
     
     // =============================================================================================
     // PPNT EXECUTION WITH MoE KERNELS
@@ -730,6 +735,8 @@ int main(int argc, char **argv) {
     // Start interferer
     // =============================================================================================
 {
+#if RUN_INTERFERER && !(RUN_INTERFERER_AT_BACK)
+
 #if DEBUG_LEVEL >= 1
         cout << "\n\n[BG] Starting background attention interferer\n" << flush;
 #endif
@@ -750,6 +757,8 @@ int main(int argc, char **argv) {
                                 dim3(bg_griddim), dim3(bg_blockdim),
                                 args, 0, bg_stream));
         // No synchronize: we want it running concurrently.
+
+#endif // RUN_INTERFERER
 }
 
 
@@ -893,6 +902,36 @@ int main(int argc, char **argv) {
         ppnt::parse_pingouts(d_plan, d_out, _n_plan, TARGET_BLOCKDIM_X, clock);
     }
 
+    // =============================================================================================
+    // Start interferer at back
+    // =============================================================================================
+{
+#if RUN_INTERFERER && RUN_INTERFERER_AT_BACK
+
+#if DEBUG_LEVEL >= 1
+        cout << "\n\n[BG] Starting background attention interferer at BACK\n" << flush;
+#endif
+
+        // Pick a grid size that uses mostly the reserved SMs (rough heuristic).
+        // If you reserved reserve_sms, try ~reserve_sms blocks with 256-1024 threads.
+        int iters_per_check = 1e6;                         // <-- tune
+
+        // Launch on bg_stream (non-cooperative)
+        void* args[] = {
+            (void*)&d_X, (void*)&d_Wqkv, (void*)&d_QKV,
+            (void*)&T, (void*)&d,
+            (void*)&d_bg_stop,
+            (void*)&iters_per_check
+        };
+
+        gpuErrchk(hipLaunchKernel((void*)bg_attn_interferer,
+                                dim3(bg_griddim), dim3(bg_blockdim),
+                                args, 0, bg_stream));
+        // No synchronize: we want it running concurrently.
+
+#endif // RUN_INTERFERER && RUN_INTERFERER_AT_BACK
+}    
+
     // 7. MOE: Gather (Yexp -> Y)
     { 
 #if DEBUG_LEVEL >= 1
@@ -919,6 +958,8 @@ int main(int argc, char **argv) {
 
 // -------------------- Stop background interference --------------------
 {
+
+#if RUN_INTERFERER
 #if DEBUG_LEVEL >= 1
     cout << "\n\n[BG] Stopping background attention interferer\n" << flush;
 #endif
@@ -927,6 +968,8 @@ int main(int argc, char **argv) {
     gpuErrchk(hipStreamSynchronize(bg_stream));
     gpuErrchk(hipStreamDestroy(bg_stream));
     gpuErrchk(hipFree(d_bg_stop));
+
+#endif // RUN_INTERFERER
 }
 
 
