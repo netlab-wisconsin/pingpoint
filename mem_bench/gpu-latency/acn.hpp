@@ -7,8 +7,14 @@
 
 namespace cg = cooperative_groups;
 
+#ifndef XCD_NUM
 #define XCD_NUM 8
-#define CC_NUM 4 
+#endif
+
+// MI350X topology: 8 XCDs organized as 2 CCs.
+#ifndef CC_NUM
+#define CC_NUM 2
+#endif
 
 #define DEBUG 0
 

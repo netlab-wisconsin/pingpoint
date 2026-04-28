@@ -1,4 +1,6 @@
 #include "hip/hip_runtime.h"
+#include <cerrno>
+#include <cstdlib>
 #include "../MeasurementSeries.hpp"
 #include "../dtime.hpp"
 #include "../gpu-clock.cuh"
@@ -83,6 +85,24 @@ __global__ void pchase(T *buf, T *__restrict__ dummy_buf, int64_t N) {
 }
 
 int main(int argc, char **argv) {
+  const char* gpu_env = std::getenv("GPU_DEVICE");
+  if (!gpu_env) gpu_env = std::getenv("HIP_DEVICE");
+  if (gpu_env && gpu_env[0] != '\0') {
+    int device_count = 0;
+    GPU_ERROR(hipGetDeviceCount(&device_count));
+    errno = 0;
+    char* endptr = nullptr;
+    long requested_device = std::strtol(gpu_env, &endptr, 10);
+    if (errno != 0 || endptr == gpu_env || *endptr != '\0' ||
+        requested_device < 0 || requested_device >= device_count) {
+      std::cerr << "Invalid GPU device index from env (GPU_DEVICE/HIP_DEVICE): "
+                << gpu_env << ", available devices: " << device_count << "\n";
+      return 1;
+    }
+    GPU_ERROR(hipSetDevice((int)requested_device));
+    std::cout << "Using HIP device " << requested_device << " from env\n";
+  }
+
   printf("Background Traffic Launches %d Blocks\n", BPX);
 
 #ifdef __NVCC__

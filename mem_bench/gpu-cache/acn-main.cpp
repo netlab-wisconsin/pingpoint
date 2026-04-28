@@ -1,6 +1,8 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_cooperative_groups.h>
 
+#include <cerrno>
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
 
@@ -54,28 +56,12 @@ __global__ void sumKernel(dtype *__restrict__ A, dtype **__restrict__ B1, dtype 
     dtype localSum = (dtype)0;
 
     dtype **B;
-
-    if (InterCCHop == 0) {
-        if (cc_id == 0)         B = B1;
-        else if (cc_id == 1)    B = B2;
-        else if (cc_id == 2)    B = B3;
-        else                    B = B4;
-    } else if (InterCCHop == 1) {
-        if (cc_id == 0)         B = B2;
-        else if (cc_id == 1)    B = B3;
-        else if (cc_id == 2)    B = B4;
-        else                    B = B1;
-    } else if (InterCCHop == 2) {
-        if (cc_id == 0)         B = B3;
-        else if (cc_id == 1)    B = B4;
-        else if (cc_id == 2)    B = B1;
-        else                    B = B2;
-    } else if (InterCCHop == 3) {
-        if (cc_id == 0)         B = B4;
-        else if (cc_id == 1)    B = B1;
-        else if (cc_id == 2)    B = B2;
-        else                    B = B3;
-    }
+    const uint32_t hop = ((InterCCHop % CC_NUM) + CC_NUM) % CC_NUM;
+    const uint32_t target_cc = (cc_id + hop) % CC_NUM;
+    if (target_cc == 0)         B = B1;
+    else if (target_cc == 1)    B = B2;
+    else if (target_cc == 2)    B = B3;
+    else                        B = B4;
 
     B += threadIdx.x;
 
@@ -208,22 +194,33 @@ void measure()
 
         // this is where the trouble is.
 
-        if (cc_dtypes[0].size() < 2*N || cc_dtypes[1].size() < 2*N ||
-            cc_dtypes[2].size() < 2*N || cc_dtypes[3].size() < 2*N) {
-            // printf("(N: %d, i: %d) Not enough dtypes in one of the CCs. Skipping this iteration.\n", N, i);
+        bool enough_dtypes = true;
+        for (int cc = 0; cc < CC_NUM; ++cc) {
+            if (cc_dtypes[cc].size() < 2 * N) {
+                enough_dtypes = false;
+                break;
+            }
+        }
+        if (!enough_dtypes) {
             GPU_ERROR(hipFree(dA));
             GPU_ERROR(hipFree(dbuf));
             continue;
-        } else {
-            // printf("(N: %d, i: %d) Enough dtypes in all CCs. Proceeding with this iteration.\n", N, i);
         }
 
 
 
         GPU_ERROR(hipMalloc(&dB1, cc_dtypes[0].size() * sizeof(dtype *)));
         GPU_ERROR(hipMalloc(&dB2, cc_dtypes[1].size() * sizeof(dtype *)));
-        GPU_ERROR(hipMalloc(&dB3, cc_dtypes[2].size() * sizeof(dtype *)));
-        GPU_ERROR(hipMalloc(&dB4, cc_dtypes[3].size() * sizeof(dtype *)));
+        if (CC_NUM > 2) {
+            GPU_ERROR(hipMalloc(&dB3, cc_dtypes[2].size() * sizeof(dtype *)));
+        } else {
+            dB3 = dB1;
+        }
+        if (CC_NUM > 3) {
+            GPU_ERROR(hipMalloc(&dB4, cc_dtypes[3].size() * sizeof(dtype *)));
+        } else {
+            dB4 = dB2;
+        }
 
         // printf("N: %d\n", N);
         // printf("dB1: %lu cc_dtypes[0]: %zu, 2N*(dtypes*): %lu, \n", bufferCount * sizeof(dtype *), cc_dtypes[0].size(), 2 * N * sizeof(dtype *));
@@ -237,8 +234,8 @@ void measure()
         // GPU_ERROR(hipMemcpy(dB4, cc_dtypes[3].data(), sizeof(dtype *) * 2*N, hipMemcpyHostToDevice));
         GPU_ERROR(hipMemcpy(dB1, cc_dtypes[0].data(), sizeof(dtype *) * cc_dtypes[0].size(), hipMemcpyHostToDevice));
         GPU_ERROR(hipMemcpy(dB2, cc_dtypes[1].data(), sizeof(dtype *) * cc_dtypes[1].size(), hipMemcpyHostToDevice));
-        GPU_ERROR(hipMemcpy(dB3, cc_dtypes[2].data(), sizeof(dtype *) * cc_dtypes[2].size(), hipMemcpyHostToDevice));
-        GPU_ERROR(hipMemcpy(dB4, cc_dtypes[3].data(), sizeof(dtype *) * cc_dtypes[3].size(), hipMemcpyHostToDevice));
+        if (CC_NUM > 2) GPU_ERROR(hipMemcpy(dB3, cc_dtypes[2].data(), sizeof(dtype *) * cc_dtypes[2].size(), hipMemcpyHostToDevice));
+        if (CC_NUM > 3) GPU_ERROR(hipMemcpy(dB4, cc_dtypes[3].data(), sizeof(dtype *) * cc_dtypes[3].size(), hipMemcpyHostToDevice));
 
         // shifting here @june: necessary?
         dA += i;
@@ -272,8 +269,8 @@ void measure()
         GPU_ERROR(hipFree(dA - i));
         GPU_ERROR(hipFree(dB1 - i));
         GPU_ERROR(hipFree(dB2 - i));
-        GPU_ERROR(hipFree(dB3 - i));
-        GPU_ERROR(hipFree(dB4 - i));
+        if (CC_NUM > 2) GPU_ERROR(hipFree(dB3 - i));
+        if (CC_NUM > 3) GPU_ERROR(hipFree(dB4 - i));
         GPU_ERROR(hipFree(dbuf));
     }
     double blockDV = 2 * N * sizeof(dtype);
@@ -305,6 +302,24 @@ size_t constexpr expSeries(size_t N)
 
 int main(int argc, char **argv)
 {
+    const char* gpu_env = std::getenv("GPU_DEVICE");
+    if (!gpu_env) gpu_env = std::getenv("HIP_DEVICE");
+    if (gpu_env && gpu_env[0] != '\0') {
+        int device_count = 0;
+        GPU_ERROR(hipGetDeviceCount(&device_count));
+        errno = 0;
+        char* endptr = nullptr;
+        long requested_device = std::strtol(gpu_env, &endptr, 10);
+        if (errno != 0 || endptr == gpu_env || *endptr != '\0' ||
+            requested_device < 0 || requested_device >= device_count) {
+            cerr << "Invalid GPU device index from env (GPU_DEVICE/HIP_DEVICE): "
+                 << gpu_env << ", available devices: " << device_count << "\n";
+            return 1;
+        }
+        GPU_ERROR(hipSetDevice((int)requested_device));
+        cout << "Using HIP device " << requested_device << " from env\n";
+    }
+
     printf("Inter-CC hop: %d\n", InterCCHop);
 
     initMeasureMetric();

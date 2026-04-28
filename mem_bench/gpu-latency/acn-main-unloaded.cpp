@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cerrno>
 #include <cinttypes>
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -31,6 +33,10 @@ typedef int64_t dtype;
 #define PINNED_XCD  0
 #ifndef PINNED_CC 
 #define PINNED_CC   0
+#endif
+
+#if (PINNED_CC < 0) || (PINNED_CC >= CC_NUM)
+#error "PINNED_CC must be in [0, CC_NUM-1] for current GPU topology."
 #endif
 
 // NOTE: This is NVIDIA PTX; it is not valid on AMD. Keeping it only because your code had it.
@@ -77,6 +83,24 @@ inline uint32_t get_cc(uint32_t xcc_id) {
 }
 
 int main(int argc, char **argv) {
+    const char* gpu_env = std::getenv("GPU_DEVICE");
+    if (!gpu_env) gpu_env = std::getenv("HIP_DEVICE");
+    if (gpu_env && gpu_env[0] != '\0') {
+        int device_count = 0;
+        GPU_ERROR(hipGetDeviceCount(&device_count));
+        errno = 0;
+        char* endptr = nullptr;
+        long requested_device = std::strtol(gpu_env, &endptr, 10);
+        if (errno != 0 || endptr == gpu_env || *endptr != '\0' ||
+            requested_device < 0 || requested_device >= device_count) {
+            cerr << "Invalid GPU device index from env (GPU_DEVICE/HIP_DEVICE): "
+                 << gpu_env << ", available devices: " << device_count << "\n";
+            return 1;
+        }
+        GPU_ERROR(hipSetDevice((int)requested_device));
+        cout << "Using HIP device " << requested_device << " from env\n";
+    }
+
     printf("Pinned XCD: %d Pinned CC: %d\n", PINNED_XCD, PINNED_CC);
 
 #ifdef __NVCC__
@@ -84,8 +108,9 @@ int main(int argc, char **argv) {
                                   hipFuncAttributePreferredSharedMemoryCarveout, 0));
 #endif
 
-    unsigned int clock = getGPUClock();
-
+    // unsigned int clock = getGPUClock();
+    unsigned int clock = 2200; // set explicitly for mi350x
+    
     const int cl_size = 128 / (int)sizeof(int64_t); // # of int64 in 128B
     const int skip_factor = 1;
 
