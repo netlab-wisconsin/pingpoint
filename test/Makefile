@@ -1,3 +1,4 @@
+# Build MoE HIP test binaries ("all" vs "only")
 BASE_DIR := $(shell pwd)
 BIN_DIR  := $(BASE_DIR)/bin
 
@@ -8,15 +9,24 @@ CCFLAGS 	:=
 INCLUDES 	:= -I$(HIP_HOME)/include/rocprofiler/ -I$(HIP_HOME)/hsa/include/hsa
 LDFLAGS 	:= -L$(HIP_HOME)/lib/rocprofiler -lrocprofiler64 -lhsa-runtime64 -lrocm_smi64 -ldl
 
-SUFFIX := all
+MOE_ALL_TARGET  := $(BIN_DIR)/moe_all
+MOE_ONLY_TARGET := $(BIN_DIR)/moe_only
 
-TARGET := $(BIN_DIR)/moe_$(SUFFIX)
+.PHONY: all only clean
 
-all: $(TARGET)
+all: $(MOE_ALL_TARGET)
+only: $(MOE_ONLY_TARGET)
 
-$(TARGET): moe.cpp moe.h ppnt.h main.h k1.h k2.h
+$(BIN_DIR):
+	mkdir -p $@
+
+$(MOE_ALL_TARGET): moe.cpp moe.h ppnt.h main.h k1.h k2.h | $(BIN_DIR)
 	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) \
 	-o $@ $<
 
-clean: 
-	rm -f $(BIN_DIR)/moe_*
+$(MOE_ONLY_TARGET): moe_only.cpp moe_only.h ppnt_only.h main.h k1.h k2.h | $(BIN_DIR)
+	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) \
+	-o $@ $<
+
+clean:
+	rm -f $(MOE_ALL_TARGET) $(MOE_ONLY_TARGET)
