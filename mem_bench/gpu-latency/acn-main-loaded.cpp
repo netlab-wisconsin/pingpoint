@@ -40,7 +40,8 @@ typedef int64_t dtype;
 #endif
 
 #ifndef BPX
-#define BPX 304
+// #define BPX 304 
+#define BPX (32*8) // MI350X has 32 CUs per XCD
 #endif
 
 // ----------------------------------------------------------------------------------

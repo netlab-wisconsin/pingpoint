@@ -14,7 +14,8 @@ SUFFIX		:= loaded
 N 			:= 1
 
 # for background bw load
-BPX			:= 304
+# BPX			:= 
+BPX			:= 256 # MI350X has 32 CUs per XCD
 CCFLAGS   	+= -D BPX=$(BPX)
 
 all: $(BIN_DIR)/$(PREFIX)-$(NAME)-$(SUFFIX)-cc0 \
