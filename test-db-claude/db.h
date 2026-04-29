@@ -58,6 +58,13 @@ struct VecScanArgs {
     int Q;
     int N_COLD;
     int hot_frac_pct;
+    // Per-block timing (nullptr to disable); indexed by physical block id
+    uint64_t *__restrict__ block_start_clk;
+    uint64_t *__restrict__ block_end_clk;
+    int      *__restrict__ block_n_queries;
+    // Per-query latency (nullptr to disable); indexed by query id
+    uint64_t *__restrict__ query_latencies;
+    uint32_t *__restrict__ query_bid;
 };
 
 struct VecScanTargetFn {
@@ -73,7 +80,15 @@ struct VecScanTargetFn {
         // Shared memory for block-level reduction (blockDimX <= 1024)
         __shared__ float shmem[1024];
 
+        if (tid == 0 && a->block_start_clk)
+            a->block_start_clk[bid] = __builtin_readcyclecounter();
+        int n_q = 0;
+
         for (int q = logical_bid; q < a->Q; q += logical_grid_sz) {
+            n_q++;
+            // All threads read the start clock (no divergence); used by tid==0 below.
+            uint64_t q_start = __builtin_readcyclecounter();
+
             bool is_hot = (q % 100) < a->hot_frac_pct;
             const float *target;
             if (is_hot) {
@@ -97,7 +112,21 @@ struct VecScanTargetFn {
                 if (tid < s) shmem[tid] += shmem[tid + s];
                 __syncthreads();
             }
-            if (tid == 0) a->results[q] = shmem[0];
+            if (tid == 0) {
+                a->results[q] = shmem[0];
+                // Write-once: the target fn is called once per ping spec in the
+                // n_plan loop; only the first call (lowest bpx) writes each query
+                // so bid reflects the block that naturally owns the query.
+                if (a->query_latencies && a->query_latencies[q] == 0) {
+                    a->query_latencies[q] = __builtin_readcyclecounter() - q_start;
+                    a->query_bid[q]       = (uint32_t)bid;
+                }
+            }
+        }
+
+        if (tid == 0 && a->block_end_clk) {
+            a->block_end_clk[bid]   = __builtin_readcyclecounter();
+            a->block_n_queries[bid] = n_q;
         }
     }
 };

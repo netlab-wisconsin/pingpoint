@@ -44,6 +44,83 @@
 
 using namespace std;
 
+// Print per-XCD QPS distribution derived from per-block wall-clock timing.
+// ns_per_query percentiles are converted to QPS (higher = better).
+// p50/p90/p99 QPS mean "X% of blocks achieve at least this throughput."
+static void parse_vecscan_qps(
+    const uint64_t *d_start, const uint64_t *d_end, const int *d_n_queries,
+    int physical_grid_size, int n_tbs_in_xcd, unsigned int clock_mhz)
+{
+    vector<uint64_t> h_start(physical_grid_size);
+    vector<uint64_t> h_end(physical_grid_size);
+    vector<int>      h_nq(physical_grid_size);
+    gpuErrchk(hipMemcpy(h_start.data(), d_start,     sizeof(uint64_t) * physical_grid_size, hipMemcpyDeviceToHost));
+    gpuErrchk(hipMemcpy(h_end.data(),   d_end,       sizeof(uint64_t) * physical_grid_size, hipMemcpyDeviceToHost));
+    gpuErrchk(hipMemcpy(h_nq.data(),    d_n_queries, sizeof(int)      * physical_grid_size, hipMemcpyDeviceToHost));
+
+    printf("[QPS per XCD — higher is better]\n");
+    for (int x = 0; x < XCD_NUM; x++) {
+        int count = 0;
+        MeasurementSeries ms;
+        // Round-robin scheduling: XCD x owns blocks where bid % XCD_NUM == x
+        for (int b = x; b < physical_grid_size; b += XCD_NUM) {
+            if (h_nq[b] <= 0) continue;
+            double cpq   = (double)(h_end[b] - h_start[b]) / h_nq[b];
+            double ns_pq = cpq / (double)clock_mhz * 1e3;
+            ms.add(ns_pq);
+            count++;
+        }
+        if (count == 0) continue;
+        // Percentiles of ns/query → QPS.  p50/p90/p99 are from the slow tail,
+        // so 1/p90_ns = throughput achieved by the slowest-10% blocks, etc.
+        double mean_ns = ms.value();
+        double p50_ns  = ms.getPercentile(0.50);
+        double p90_ns  = ms.getPercentile(0.90);
+        double p99_ns  = ms.getPercentile(0.99);
+        printf("  XCD%d (%2d blocks): mean=%9.0f  p50=%9.0f  p90=%9.0f  p99=%9.0f  QPS\n",
+               x, count,
+               1e9 / mean_ns, 1e9 / p50_ns, 1e9 / p90_ns, 1e9 / p99_ns);
+    }
+}
+
+// Print per-XCD tail query latency (ns) from per-query wall-clock measurements.
+// q_start is read before the hot-chunk load; q_end is read after the final syncthreads.
+// Each query's latency therefore includes its full HBM stall time, un-amortized.
+static void parse_query_tail_latency(
+    const uint64_t *d_latencies, const uint32_t *d_bids,
+    int Q, int n_tbs_in_xcd, unsigned int clock_mhz)
+{
+    vector<uint64_t> h_lat(Q);
+    vector<uint32_t> h_bid(Q);
+    gpuErrchk(hipMemcpy(h_lat.data(), d_latencies, sizeof(uint64_t) * Q, hipMemcpyDeviceToHost));
+    gpuErrchk(hipMemcpy(h_bid.data(), d_bids,      sizeof(uint32_t) * Q, hipMemcpyDeviceToHost));
+
+    vector<MeasurementSeries> per_xcd(XCD_NUM);
+    MeasurementSeries all_ms;
+    for (int q = 0; q < Q; q++) {
+        if (h_lat[q] == 0) continue; // unwritten slot (ping block owns this query)
+        double ns = h_lat[q] / (double)clock_mhz * 1e3;
+        int x = (int)(h_bid[q] % XCD_NUM); // round-robin: XCD = bid % XCD_NUM
+        all_ms.add(ns);
+        if (x >= 0 && x < XCD_NUM) per_xcd[x].add(ns);
+    }
+
+    auto print_row = [](const char *lbl, MeasurementSeries &ms) {
+        printf("  %-6s p50=%7.1f  p90=%7.1f  p99=%7.1f  p99.9=%7.1f  p99.99=%7.1f  ns\n",
+               lbl,
+               ms.getPercentile(0.500),  ms.getPercentile(0.900),
+               ms.getPercentile(0.990),  ms.getPercentile(0.999),
+               ms.getPercentile(0.9999));
+    };
+
+    printf("[Query tail latency (ns) — lower is better]\n");
+    print_row("ALL:", all_ms);
+    for (int x = 0; x < XCD_NUM; x++) {
+        char lbl[8]; snprintf(lbl, sizeof(lbl), "XCD%d:", x);
+        print_row(lbl, per_xcd[x]);
+    }
+}
+
 int main(int argc, char **argv) {
 
     // @june: gpu clock set to 2100 as mi3008x node reports incorrect clock values
@@ -448,8 +525,19 @@ int main(int argc, char **argv) {
     //    Demonstrates: all XCDs pull the hot embedding from a remote HBM.
     {
         printf("\n\nVECSCAN (hot entry in HBM%d — BAD placement)\n", HOT_HBM);
+        uint64_t *d_blk_start = nullptr, *d_blk_end = nullptr;
+        int      *d_blk_nq    = nullptr;
+        gpuErrchk(hipMalloc(&d_blk_start, sizeof(uint64_t) * physical_grid_size));
+        gpuErrchk(hipMalloc(&d_blk_end,   sizeof(uint64_t) * physical_grid_size));
+        gpuErrchk(hipMalloc(&d_blk_nq,    sizeof(int)      * physical_grid_size));
+        gpuErrchk(hipMemset(d_blk_nq, 0,  sizeof(int)      * physical_grid_size));
+        uint64_t *d_q_lat = nullptr; uint32_t *d_q_bid = nullptr;
+        gpuErrchk(hipMalloc(&d_q_lat, sizeof(uint64_t) * Q));
+        gpuErrchk(hipMemset(d_q_lat, 0, sizeof(uint64_t) * Q));
+        gpuErrchk(hipMalloc(&d_q_bid, sizeof(uint32_t) * Q));
         VecScanArgs h_args = {d_hot_chunk_ptrs, d_cold_entries, d_query_vecs, d_results,
-                              Q, N_COLD, HOT_FRAC_PCT};
+                              Q, N_COLD, HOT_FRAC_PCT,
+                              d_blk_start, d_blk_end, d_blk_nq, d_q_lat, d_q_bid};
         VecScanArgs *d_args = nullptr;
         gpuErrchk(hipMalloc(&d_args, sizeof(VecScanArgs)));
         gpuErrchk(hipMemcpy(d_args, &h_args, sizeof(VecScanArgs), hipMemcpyHostToDevice));
@@ -462,7 +550,12 @@ int main(int argc, char **argv) {
             dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
         gpuErrchk(hipStreamSynchronize(stream));
         ppnt::parse_pingouts(d_plan, d_out, _n_plan, TARGET_BLOCKDIM_X, clock);
-        gpuErrchk(hipFree(d_args));
+        parse_vecscan_qps(d_blk_start, d_blk_end, d_blk_nq,
+                          physical_grid_size, physical_grid_size / XCD_NUM, clock);
+        parse_query_tail_latency(d_q_lat, d_q_bid, Q, physical_grid_size / XCD_NUM, clock);
+        gpuErrchk(hipFree(d_blk_start)); gpuErrchk(hipFree(d_blk_end));
+        gpuErrchk(hipFree(d_blk_nq));   gpuErrchk(hipFree(d_q_lat));
+        gpuErrchk(hipFree(d_q_bid));     gpuErrchk(hipFree(d_args));
     }
 
     // 2. AtomicAgg — hot aggregator in HOT_HBM (bad placement)
@@ -491,8 +584,19 @@ int main(int argc, char **argv) {
     //    XCD0→HBM4 path because most reads now come from HBM0 instead.
     {
         printf("\n\nVECSCAN (hot entry migrated to HBM%d — GOOD placement)\n", LOCAL_HBM);
+        uint64_t *d_blk_start = nullptr, *d_blk_end = nullptr;
+        int      *d_blk_nq    = nullptr;
+        gpuErrchk(hipMalloc(&d_blk_start, sizeof(uint64_t) * physical_grid_size));
+        gpuErrchk(hipMalloc(&d_blk_end,   sizeof(uint64_t) * physical_grid_size));
+        gpuErrchk(hipMalloc(&d_blk_nq,    sizeof(int)      * physical_grid_size));
+        gpuErrchk(hipMemset(d_blk_nq, 0,  sizeof(int)      * physical_grid_size));
+        uint64_t *d_q_lat = nullptr; uint32_t *d_q_bid = nullptr;
+        gpuErrchk(hipMalloc(&d_q_lat, sizeof(uint64_t) * Q));
+        gpuErrchk(hipMemset(d_q_lat, 0, sizeof(uint64_t) * Q));
+        gpuErrchk(hipMalloc(&d_q_bid, sizeof(uint32_t) * Q));
         VecScanArgs h_args = {d_local_chunk_ptrs, d_cold_entries, d_query_vecs, d_results,
-                              Q, N_COLD, HOT_FRAC_PCT};
+                              Q, N_COLD, HOT_FRAC_PCT,
+                              d_blk_start, d_blk_end, d_blk_nq, d_q_lat, d_q_bid};
         VecScanArgs *d_args = nullptr;
         gpuErrchk(hipMalloc(&d_args, sizeof(VecScanArgs)));
         gpuErrchk(hipMemcpy(d_args, &h_args, sizeof(VecScanArgs), hipMemcpyHostToDevice));
@@ -505,7 +609,12 @@ int main(int argc, char **argv) {
             dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
         gpuErrchk(hipStreamSynchronize(stream));
         ppnt::parse_pingouts(d_plan, d_out, _n_plan, TARGET_BLOCKDIM_X, clock);
-        gpuErrchk(hipFree(d_args));
+        parse_vecscan_qps(d_blk_start, d_blk_end, d_blk_nq,
+                          physical_grid_size, physical_grid_size / XCD_NUM, clock);
+        parse_query_tail_latency(d_q_lat, d_q_bid, Q, physical_grid_size / XCD_NUM, clock);
+        gpuErrchk(hipFree(d_blk_start)); gpuErrchk(hipFree(d_blk_end));
+        gpuErrchk(hipFree(d_blk_nq));   gpuErrchk(hipFree(d_q_lat));
+        gpuErrchk(hipFree(d_q_bid));     gpuErrchk(hipFree(d_args));
     }
 
     gpuErrchk(hipStreamDestroy(stream));
