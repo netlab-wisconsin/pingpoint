@@ -27,6 +27,9 @@ using namespace std;
 // "Good" placement: hot table lives in HBM0, local to XCD0
 #define LOCAL_HBM 0
 
+// HBM used by XCD2/XCD3 in the focused experiment
+#define XCD23_HBM 6
+
 // Fraction (0-100) of queries that target the hot table
 #define HOT_FRAC_PCT 90
 
@@ -65,6 +68,8 @@ struct VecScanArgs {
     // Per-query latency (nullptr to disable); indexed by query id
     uint64_t *__restrict__ query_latencies;
     uint32_t *__restrict__ query_bid;
+    // Bitmask of XCDs that execute queries (0 = all XCDs active)
+    int active_xcd_mask;
 };
 
 struct VecScanTargetFn {
@@ -73,6 +78,10 @@ struct VecScanTargetFn {
                     int bid, int tid, int gridDimX, int blockDimX,
                     int n_ppnt_tbs_in_xcd) const
     {
+        int xcd_lane        = bid % XCD_NUM;
+        if (a->active_xcd_mask != 0 && !((a->active_xcd_mask >> xcd_lane) & 1))
+            return;
+
         int n_tbs_in_xcd    = gridDimX / XCD_NUM;
         int logical_bid     = ppnt::physical_to_logical_bid(bid, n_tbs_in_xcd, n_ppnt_tbs_in_xcd);
         int logical_grid_sz = (n_tbs_in_xcd - n_ppnt_tbs_in_xcd) * XCD_NUM;

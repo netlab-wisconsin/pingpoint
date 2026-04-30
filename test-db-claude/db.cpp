@@ -34,6 +34,8 @@
 
 #define DISABLE_K1_PLANS 0
 #define DISABLE_K2_PLANS 0
+// Keep K2 data setup for HBM placement, but disable K2 ping generation.
+#define ENABLE_BW_PINGS 0
 
 // Which DB stages to co-profile with pings
 #define PPNT_PROFILE_VECSCAN_HOT   1   // VecScan, hot entry in HOT_HBM  (bad placement)
@@ -119,6 +121,38 @@ static void parse_query_tail_latency(
         char lbl[8]; snprintf(lbl, sizeof(lbl), "XCD%d:", x);
         print_row(lbl, per_xcd[x]);
     }
+}
+
+static float launch_fused_and_time(
+    void *kernel, int physical_grid_size, void **kargs, hipStream_t stream)
+{
+    hipEvent_t ev_s, ev_e;
+    gpuErrchk(hipEventCreate(&ev_s));
+    gpuErrchk(hipEventCreate(&ev_e));
+    gpuErrchk(hipEventRecord(ev_s, stream));
+    gpuErrchk(hipLaunchCooperativeKernel(
+        kernel, dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
+    gpuErrchk(hipEventRecord(ev_e, stream));
+    gpuErrchk(hipStreamSynchronize(stream));
+    float ms = 0.0f;
+    gpuErrchk(hipEventElapsedTime(&ms, ev_s, ev_e));
+    gpuErrchk(hipEventDestroy(ev_s));
+    gpuErrchk(hipEventDestroy(ev_e));
+    return ms;
+}
+
+static void log_tput_impact(
+    const char *tag, double n_ops, const char *unit, float solo_ms, float corun_ms, size_t n_replays)
+{
+    if (n_replays == 0) n_replays = 1;
+    const double corun_per_ping_ms = corun_ms / (double)n_replays;
+    const double solo_tput  = n_ops / (solo_ms  * 1e-3);
+    const double corun_tput = n_ops / (corun_per_ping_ms * 1e-3);
+    const double drop_pct = (solo_tput > 0.0) ? (100.0 * (1.0 - corun_tput / solo_tput)) : 0.0;
+    const double slowdown = (solo_ms > 0.0f) ? (corun_per_ping_ms / solo_ms) : 0.0;
+    printf("[DB THROUGHPUT] %s: solo=%.2f ms (%.0f %s), co-run-total=%.2f ms over %zu pings, "
+           "co-run-per-ping=%.2f ms (%.0f %s), drop=%.2f%%, slowdown=%.2fx\n",
+           tag, solo_ms, solo_tput, unit, corun_ms, n_replays, corun_per_ping_ms, corun_tput, unit, drop_pct, slowdown);
 }
 
 int main(int argc, char **argv) {
@@ -342,7 +376,7 @@ int main(int argc, char **argv) {
 #endif
 #endif // !DISABLE_K1_PLANS
 
-#if !(DISABLE_K2_PLANS)
+#if !(DISABLE_K2_PLANS) && (ENABLE_BW_PINGS)
     // Bandwidth plans ------------------------------------------------------
 #if !(PPNT_PLAN_SELECTED_ONLY)
     for (int x = 0; x < XCD_NUM; x++) {
@@ -392,7 +426,7 @@ int main(int argc, char **argv) {
         }
     }
 #endif
-#endif // !DISABLE_K2_PLANS
+#endif // !DISABLE_K2_PLANS && ENABLE_BW_PINGS
 
     size_t n_plan = h_plan.size();
     if (n_plan > 0) {
@@ -409,7 +443,7 @@ int main(int argc, char **argv) {
     // Query count (argv[1]).  Must satisfy Q*0.9/XCD_NUM > N_HOT_CHUNKS/2 for
     // the hot-table working set to exceed L2 (4MB/XCD) and produce HBM misses.
     // With N_HOT_CHUNKS=4096: need Q > 18205.  Default is 32768.
-    const int Q      = (argc > 1) ? atoi(argv[1]) : 32768;
+    const int Q      = (argc > 1) ? atoi(argv[1]) : (1 << 19); // 524288
     const int N_COLD = max(Q, 1024);
     const int N_AGG  = N_COLD; // aggregation rounds
 
@@ -445,10 +479,12 @@ int main(int argc, char **argv) {
     //   [N_HOT_CHUNKS .. 2*N_HOT_CHUNKS-1] → AtomicAgg hot-table writes
     // ------------------------------------------------------------------
 #if !(DISABLE_K2_PLANS)
-    assert(k2_min_num_chunks_over_n_datas[HOT_HBM]  >= 2 * N_HOT_CHUNKS &&
+    assert(k2_min_num_chunks_over_n_datas[HOT_HBM]   >= 2 * N_HOT_CHUNKS &&
            "need 2*N_HOT_CHUNKS chunks in HOT_HBM");
-    assert(k2_min_num_chunks_over_n_datas[LOCAL_HBM] >= N_HOT_CHUNKS &&
+    assert(k2_min_num_chunks_over_n_datas[LOCAL_HBM]  >= N_HOT_CHUNKS &&
            "need N_HOT_CHUNKS chunks in LOCAL_HBM");
+    assert(k2_min_num_chunks_over_n_datas[XCD23_HBM]  >= N_HOT_CHUNKS &&
+           "need N_HOT_CHUNKS chunks in XCD23_HBM");
 
     // VecScan hot path: N_HOT_CHUNKS slabs in HOT_HBM (8MB total)
     uint64_t *d_hot_chunk_ptrs   = k2_d_chunks_per_hbm[0] + k2_h_offsets[0][HOT_HBM];
@@ -457,12 +493,15 @@ int main(int argc, char **argv) {
                                    + N_HOT_CHUNKS;
     // VecScan migration path: N_HOT_CHUNKS slabs in LOCAL_HBM (8MB total)
     uint64_t *d_local_chunk_ptrs = k2_d_chunks_per_hbm[0] + k2_h_offsets[0][LOCAL_HBM];
+    // VecScan XCD2/XCD3 focused experiment: N_HOT_CHUNKS slabs in XCD23_HBM
+    uint64_t *d_hbm6_chunk_ptrs  = k2_d_chunks_per_hbm[0] + k2_h_offsets[0][XCD23_HBM];
 #else
     printf("[DB] WARNING: K2 disabled; hot table is not pinned to HOT_HBM.\n");
     // Without K2, allocate a stub pointer array on the device (no HBM guarantee).
     uint64_t *d_hot_chunk_ptrs   = nullptr;
     uint64_t *d_hot_agg_ptrs     = nullptr;
     uint64_t *d_local_chunk_ptrs = nullptr;
+    uint64_t *d_hbm6_chunk_ptrs  = nullptr;
     // (In practice, re-enable K2 to get meaningful HBM-placement results.)
 #endif
 
@@ -521,10 +560,10 @@ int main(int argc, char **argv) {
         gpuErrchk(hipFree(d_args));
     }
 
-    // 1. VecScan — hot entry in HOT_HBM (bad placement)
-    //    Demonstrates: all XCDs pull the hot embedding from a remote HBM.
+    // 1. VecScan — XCD2 and XCD3 only, 90% hot queries to HBM6
+    //    All other XCDs skip the query loop entirely (active_xcd_mask gates them out).
     {
-        printf("\n\nVECSCAN (hot entry in HBM%d — BAD placement)\n", HOT_HBM);
+        printf("\n\nVECSCAN (XCD2+XCD3 only, hot entry in HBM%d)\n", XCD23_HBM);
         uint64_t *d_blk_start = nullptr, *d_blk_end = nullptr;
         int      *d_blk_nq    = nullptr;
         gpuErrchk(hipMalloc(&d_blk_start, sizeof(uint64_t) * physical_grid_size));
@@ -535,20 +574,33 @@ int main(int argc, char **argv) {
         gpuErrchk(hipMalloc(&d_q_lat, sizeof(uint64_t) * Q));
         gpuErrchk(hipMemset(d_q_lat, 0, sizeof(uint64_t) * Q));
         gpuErrchk(hipMalloc(&d_q_bid, sizeof(uint32_t) * Q));
-        VecScanArgs h_args = {d_hot_chunk_ptrs, d_cold_entries, d_query_vecs, d_results,
+        const int xcd23_mask = (1 << 2) | (1 << 3);
+        VecScanArgs h_args = {d_hbm6_chunk_ptrs, d_cold_entries, d_query_vecs, d_results,
                               Q, N_COLD, HOT_FRAC_PCT,
-                              d_blk_start, d_blk_end, d_blk_nq, d_q_lat, d_q_bid};
+                              d_blk_start, d_blk_end, d_blk_nq, d_q_lat, d_q_bid,
+                              xcd23_mask};
         VecScanArgs *d_args = nullptr;
         gpuErrchk(hipMalloc(&d_args, sizeof(VecScanArgs)));
         gpuErrchk(hipMemcpy(d_args, &h_args, sizeof(VecScanArgs), hipMemcpyHostToDevice));
         VecScanTargetFn fn{};
-        size_t _n_plan = PPNT_PROFILE_VECSCAN_HOT ? n_plan : 0;
+        size_t _n_plan = n_plan;
         void *kargs[] = {(void *)&fn, (void *)&d_args, (void *)&d_plan,
                          (void *)&_n_plan, (void *)&d_out};
-        gpuErrchk(hipLaunchCooperativeKernel(
+        size_t n_plan_solo = 0;
+        void *kargs_solo[] = {(void *)&fn, (void *)&d_args, (void *)&d_plan,
+                              (void *)&n_plan_solo, (void *)&d_out};
+        float solo_ms = launch_fused_and_time(
             (void *)ppnt::fused_kernel<VecScanTargetFn, VecScanArgs>,
-            dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
-        gpuErrchk(hipStreamSynchronize(stream));
+            physical_grid_size, kargs_solo, stream);
+        gpuErrchk(hipMemsetAsync(d_blk_start, 0, sizeof(uint64_t) * physical_grid_size, stream));
+        gpuErrchk(hipMemsetAsync(d_blk_end,   0, sizeof(uint64_t) * physical_grid_size, stream));
+        gpuErrchk(hipMemsetAsync(d_blk_nq,    0, sizeof(int)      * physical_grid_size, stream));
+        gpuErrchk(hipMemsetAsync(d_q_lat,     0, sizeof(uint64_t) * Q, stream));
+        gpuErrchk(hipMemsetAsync(d_q_bid,     0, sizeof(uint32_t) * Q, stream));
+        float corun_ms = launch_fused_and_time(
+            (void *)ppnt::fused_kernel<VecScanTargetFn, VecScanArgs>,
+            physical_grid_size, kargs, stream);
+        log_tput_impact("VECSCAN XCD23@HBM6", (double)Q, "QPS", solo_ms, corun_ms, _n_plan);
         ppnt::parse_pingouts(d_plan, d_out, _n_plan, TARGET_BLOCKDIM_X, clock);
         parse_vecscan_qps(d_blk_start, d_blk_end, d_blk_nq,
                           physical_grid_size, physical_grid_size / XCD_NUM, clock);
@@ -571,50 +623,18 @@ int main(int argc, char **argv) {
         size_t _n_plan = PPNT_PROFILE_ATOMICAGG ? n_plan : 0;
         void *kargs[] = {(void *)&fn, (void *)&d_args, (void *)&d_plan,
                          (void *)&_n_plan, (void *)&d_out};
-        gpuErrchk(hipLaunchCooperativeKernel(
+        size_t n_plan_solo = 0;
+        void *kargs_solo[] = {(void *)&fn, (void *)&d_args, (void *)&d_plan,
+                              (void *)&n_plan_solo, (void *)&d_out};
+        float solo_ms = launch_fused_and_time(
             (void *)ppnt::fused_kernel<AtomicAggTargetFn, AtomicAggArgs>,
-            dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
-        gpuErrchk(hipStreamSynchronize(stream));
+            physical_grid_size, kargs_solo, stream);
+        float corun_ms = launch_fused_and_time(
+            (void *)ppnt::fused_kernel<AtomicAggTargetFn, AtomicAggArgs>,
+            physical_grid_size, kargs, stream);
+        log_tput_impact("ATOMICAGG hot@HBM4", (double)N_AGG, "updates/s", solo_ms, corun_ms, _n_plan);
         ppnt::parse_pingouts(d_plan, d_out, _n_plan, TARGET_BLOCKDIM_X, clock);
         gpuErrchk(hipFree(d_args));
-    }
-
-    // 3. VecScan — hot entry migrated to LOCAL_HBM (good placement)
-    //    After "migration", the same query pattern sees lower congestion on the
-    //    XCD0→HBM4 path because most reads now come from HBM0 instead.
-    {
-        printf("\n\nVECSCAN (hot entry migrated to HBM%d — GOOD placement)\n", LOCAL_HBM);
-        uint64_t *d_blk_start = nullptr, *d_blk_end = nullptr;
-        int      *d_blk_nq    = nullptr;
-        gpuErrchk(hipMalloc(&d_blk_start, sizeof(uint64_t) * physical_grid_size));
-        gpuErrchk(hipMalloc(&d_blk_end,   sizeof(uint64_t) * physical_grid_size));
-        gpuErrchk(hipMalloc(&d_blk_nq,    sizeof(int)      * physical_grid_size));
-        gpuErrchk(hipMemset(d_blk_nq, 0,  sizeof(int)      * physical_grid_size));
-        uint64_t *d_q_lat = nullptr; uint32_t *d_q_bid = nullptr;
-        gpuErrchk(hipMalloc(&d_q_lat, sizeof(uint64_t) * Q));
-        gpuErrchk(hipMemset(d_q_lat, 0, sizeof(uint64_t) * Q));
-        gpuErrchk(hipMalloc(&d_q_bid, sizeof(uint32_t) * Q));
-        VecScanArgs h_args = {d_local_chunk_ptrs, d_cold_entries, d_query_vecs, d_results,
-                              Q, N_COLD, HOT_FRAC_PCT,
-                              d_blk_start, d_blk_end, d_blk_nq, d_q_lat, d_q_bid};
-        VecScanArgs *d_args = nullptr;
-        gpuErrchk(hipMalloc(&d_args, sizeof(VecScanArgs)));
-        gpuErrchk(hipMemcpy(d_args, &h_args, sizeof(VecScanArgs), hipMemcpyHostToDevice));
-        VecScanTargetFn fn{};
-        size_t _n_plan = PPNT_PROFILE_VECSCAN_LOCAL ? n_plan : 0;
-        void *kargs[] = {(void *)&fn, (void *)&d_args, (void *)&d_plan,
-                         (void *)&_n_plan, (void *)&d_out};
-        gpuErrchk(hipLaunchCooperativeKernel(
-            (void *)ppnt::fused_kernel<VecScanTargetFn, VecScanArgs>,
-            dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
-        gpuErrchk(hipStreamSynchronize(stream));
-        ppnt::parse_pingouts(d_plan, d_out, _n_plan, TARGET_BLOCKDIM_X, clock);
-        parse_vecscan_qps(d_blk_start, d_blk_end, d_blk_nq,
-                          physical_grid_size, physical_grid_size / XCD_NUM, clock);
-        parse_query_tail_latency(d_q_lat, d_q_bid, Q, physical_grid_size / XCD_NUM, clock);
-        gpuErrchk(hipFree(d_blk_start)); gpuErrchk(hipFree(d_blk_end));
-        gpuErrchk(hipFree(d_blk_nq));   gpuErrchk(hipFree(d_q_lat));
-        gpuErrchk(hipFree(d_q_bid));     gpuErrchk(hipFree(d_args));
     }
 
     gpuErrchk(hipStreamDestroy(stream));
