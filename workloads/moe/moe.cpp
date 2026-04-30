@@ -10,25 +10,24 @@
 #include <algorithm>
 #include <cinttypes> 
 
-#include "../mem_bench/gpu-clock.cuh"
-#include "../mem_bench/MeasurementSeries.hpp"
+#include "../../mem_bench/gpu-clock.cuh"
+#include "../../mem_bench/MeasurementSeries.hpp"
 
 #include "main.h"
 #include "ppnt.h"
-#include "ppnt_only.h"
-#include "moe_only.h"
+#include "moe.h"
 #include "k1.h"
 #include "k2.h"
 
 #define DEBUG_LEVEL 1 // 0: MoE, 1: PPNT, 2+: Misc
 #define FAST 1 // set for faster debugging, set 0 for actual measurement
-#define PPNT_PLAN_SELECTED_ONLY 1 // set to only generate selected plans
+#define PPNT_PLAN_SELECTED_ONLY 0 // set to only generate selected plans
 
 using namespace std;
 
 #define TARGET_BLOCKDIM_X (1024)
 
-#define DISABLE_K1_PLANS 1
+#define DISABLE_K1_PLANS 0
 #define DISABLE_K2_PLANS 0
 
 #define PPNT_PROFILE_ATTENTION1 1
@@ -540,32 +539,6 @@ int main(int argc, char **argv) {
         gpuErrchk(hipMemcpy(d_out,  h_out.data(),  sizeof(ppnt::PingOut)  * n_plan, hipMemcpyHostToDevice));
     }
 
-    // =============================================================================================
-    // K2-ONLY PLAN SETUP FOR FEATURE 2 (co-run measurements using PingOut2 + fused_kernel2)
-    // =============================================================================================
-
-    vector<ppnt::PingSpec> h_k2plan;
-    vector<ppnt::PingOut2> h_k2out2;
-    for (size_t i = 0; i < n_plan; i++) {
-        if (h_plan[i].kind == ppnt::PingKind::Bandwidth) {
-            h_k2plan.push_back(h_plan[i]);
-            ppnt::PingOut2 o2;
-            gpuErrchk(hipMalloc(&o2.iterClk,       sizeof(uint64_t) * h_plan[i].iters * h_plan[i].bpx));
-            gpuErrchk(hipMalloc(&o2.moe_start_clk, sizeof(uint64_t)));
-            gpuErrchk(hipMalloc(&o2.moe_end_clk,   sizeof(uint64_t)));
-            h_k2out2.push_back(o2);
-        }
-    }
-    size_t n_k2plan = h_k2plan.size();
-    ppnt::PingSpec* d_k2plan = nullptr;
-    ppnt::PingOut2* d_k2out2 = nullptr;
-    if (n_k2plan > 0) {
-        gpuErrchk(hipMalloc(&d_k2plan, sizeof(ppnt::PingSpec) * n_k2plan));
-        gpuErrchk(hipMalloc(&d_k2out2, sizeof(ppnt::PingOut2) * n_k2plan));
-        gpuErrchk(hipMemcpy(d_k2plan, h_k2plan.data(), sizeof(ppnt::PingSpec) * n_k2plan, hipMemcpyHostToDevice));
-        gpuErrchk(hipMemcpy(d_k2out2, h_k2out2.data(), sizeof(ppnt::PingOut2) * n_k2plan, hipMemcpyHostToDevice));
-    }
-
 
     // =============================================================================================
     // MoE SETUP
@@ -656,12 +629,11 @@ int main(int argc, char **argv) {
         float *h_X = (float*)malloc(sizeof(float) * (size_t)T * d);
         int   *h_eid = (int*)malloc(sizeof(int)   * (size_t)T);
         fill_random(h_X, (size_t)T * d);
-
-#if IMBALANCED_DISTRIBUTION
+#if 0
+        fill_expert_ids(h_eid, T, E);
+#else
         // Deterministic, exact counts per expert (90% to E0), for experimental reproducibility
         fill_expert_ids_fixed(h_eid, T, E);
-#else
-        fill_expert_ids(h_eid, T, E);
 #endif
 
 #if DEBUG_LEVEL >= 0
@@ -699,17 +671,8 @@ int main(int argc, char **argv) {
     // Reset counters
     gpuErrchk(hipMemsetAsync(d_cnt, 0, sizeof(int) * (size_t)E, stream));
 
-    // Theoretical bytes accessed per kernel (read + write, floats unless noted)
-    const size_t B_attn_qkv = sizeof(float) * ((size_t)T*d + (size_t)d*3*d + (size_t)T*3*d);
-    const size_t B_attn_out = sizeof(float) * ((size_t)T*3*d + (size_t)3*d*d + (size_t)T*d);
-    const size_t B_scatter  = sizeof(float)*(size_t)T*d*2 + sizeof(int)*(size_t)T*2;
-    const size_t B_ffn1     = sizeof(float)*((size_t)T*d + (size_t)E*d*hidden + (size_t)T*hidden);
-    const size_t B_relu     = sizeof(float)*(size_t)T*hidden*2;
-    const size_t B_ffn2     = sizeof(float)*((size_t)T*hidden + (size_t)E*hidden*d + (size_t)T*d);
-    const size_t B_gather   = sizeof(float)*(size_t)T*d*2 + sizeof(int)*(size_t)T;
-
     // =============================================================================================
-    // PPNT EXECUTION WITH MoE KERNELS (integrated solo + co-run throughput)
+    // PPNT EXECUTION WITH MoE KERNELS
     // =============================================================================================
 
     // 0. PPNT ONLY: For baseline profiling
@@ -744,52 +707,6 @@ int main(int argc, char **argv) {
         gpuErrchk(hipMemcpyAsync(d_args, &h_args, sizeof(AttnQKVArgs), hipMemcpyHostToDevice, stream));
 
         AttnQKVTargetFn fn{};
-        // Solo throughput (target only)
-        {
-            hipEvent_t ev_s, ev_e;
-            gpuErrchk(hipEventCreate(&ev_s));
-            gpuErrchk(hipEventCreate(&ev_e));
-            size_t n_plan_solo = 0;
-            void* kargs_solo[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&n_plan_solo, (void*)&d_out };
-            gpuErrchk(hipEventRecord(ev_s, stream));
-            gpuErrchk(hipLaunchCooperativeKernel(
-                (void*)ppnt::fused_kernel<AttnQKVTargetFn, AttnQKVArgs>,
-                dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs_solo, 0, stream));
-            gpuErrchk(hipEventRecord(ev_e, stream));
-            gpuErrchk(hipStreamSynchronize(stream));
-            float ms = 0;
-            gpuErrchk(hipEventElapsedTime(&ms, ev_s, ev_e));
-            ppnt::log_solo_throughput("AttnQKV", ms, B_attn_qkv);
-            gpuErrchk(hipEventDestroy(ev_s));
-            gpuErrchk(hipEventDestroy(ev_e));
-        }
-
-        // Co-run throughput (target + k2 ping)
-        if (n_k2plan > 0) {
-            for (size_t pi = 0; pi < n_k2plan; ++pi) {
-                const ppnt::PingSpec& p = h_k2plan[pi];
-                hipEvent_t ev_s, ev_e;
-                gpuErrchk(hipEventCreate(&ev_s));
-                gpuErrchk(hipEventCreate(&ev_e));
-                ppnt::init_moe_clks(h_k2out2, stream);
-                ppnt::PingSpec* d_k2plan_one = d_k2plan + pi;
-                ppnt::PingOut2* d_k2out2_one = d_k2out2 + pi;
-                size_t n_k2plan_one = 1;
-                void* kargs_corun[] = { (void*)&fn, (void*)&d_args, (void*)&d_k2plan_one, (void*)&n_k2plan_one, (void*)&d_k2out2_one };
-                gpuErrchk(hipEventRecord(ev_s, stream));
-                gpuErrchk(hipLaunchCooperativeKernel(
-                    (void*)ppnt::fused_kernel2<AttnQKVTargetFn, AttnQKVArgs>,
-                    dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs_corun, 0, stream));
-                gpuErrchk(hipEventRecord(ev_e, stream));
-                gpuErrchk(hipStreamSynchronize(stream));
-                float ms = 0;
-                gpuErrchk(hipEventElapsedTime(&ms, ev_s, ev_e));
-                ppnt::log_corun_throughput("AttnQKV", ms, B_attn_qkv, &p);
-                gpuErrchk(hipEventDestroy(ev_s));
-                gpuErrchk(hipEventDestroy(ev_e));
-            }
-        }
-
         size_t _n_plan = (PPNT_PROFILE_ATTENTION1) ? n_plan : 0; // set to 0 to bypass ppnt execution
         void* kargs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&_n_plan, (void*)&d_out };
 
@@ -811,52 +728,6 @@ int main(int argc, char **argv) {
         gpuErrchk(hipMemcpyAsync(d_args, &h_args, sizeof(AttnOutArgs), hipMemcpyHostToDevice, stream));
 
         AttnOutTargetFn fn{};
-        // Solo throughput (target only)
-        {
-            hipEvent_t ev_s, ev_e;
-            gpuErrchk(hipEventCreate(&ev_s));
-            gpuErrchk(hipEventCreate(&ev_e));
-            size_t n_plan_solo = 0;
-            void* kargs_solo[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&n_plan_solo, (void*)&d_out };
-            gpuErrchk(hipEventRecord(ev_s, stream));
-            gpuErrchk(hipLaunchCooperativeKernel(
-                (void*)ppnt::fused_kernel<AttnOutTargetFn, AttnOutArgs>,
-                dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs_solo, 0, stream));
-            gpuErrchk(hipEventRecord(ev_e, stream));
-            gpuErrchk(hipStreamSynchronize(stream));
-            float ms = 0;
-            gpuErrchk(hipEventElapsedTime(&ms, ev_s, ev_e));
-            ppnt::log_solo_throughput("AttnOut", ms, B_attn_out);
-            gpuErrchk(hipEventDestroy(ev_s));
-            gpuErrchk(hipEventDestroy(ev_e));
-        }
-
-        // Co-run throughput (target + k2 ping)
-        if (n_k2plan > 0) {
-            for (size_t pi = 0; pi < n_k2plan; ++pi) {
-                const ppnt::PingSpec& p = h_k2plan[pi];
-                hipEvent_t ev_s, ev_e;
-                gpuErrchk(hipEventCreate(&ev_s));
-                gpuErrchk(hipEventCreate(&ev_e));
-                ppnt::init_moe_clks(h_k2out2, stream);
-                ppnt::PingSpec* d_k2plan_one = d_k2plan + pi;
-                ppnt::PingOut2* d_k2out2_one = d_k2out2 + pi;
-                size_t n_k2plan_one = 1;
-                void* kargs_corun[] = { (void*)&fn, (void*)&d_args, (void*)&d_k2plan_one, (void*)&n_k2plan_one, (void*)&d_k2out2_one };
-                gpuErrchk(hipEventRecord(ev_s, stream));
-                gpuErrchk(hipLaunchCooperativeKernel(
-                    (void*)ppnt::fused_kernel2<AttnOutTargetFn, AttnOutArgs>,
-                    dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs_corun, 0, stream));
-                gpuErrchk(hipEventRecord(ev_e, stream));
-                gpuErrchk(hipStreamSynchronize(stream));
-                float ms = 0;
-                gpuErrchk(hipEventElapsedTime(&ms, ev_s, ev_e));
-                ppnt::log_corun_throughput("AttnOut", ms, B_attn_out, &p);
-                gpuErrchk(hipEventDestroy(ev_s));
-                gpuErrchk(hipEventDestroy(ev_e));
-            }
-        }
-
         size_t _n_plan = (PPNT_PROFILE_ATTENTION2) ? n_plan : 0; // set to 0 to bypass ppnt execution
         void* kargs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&_n_plan, (void*)&d_out };
 
@@ -868,12 +739,12 @@ int main(int argc, char **argv) {
     }
 
     // 3. MOE: Scatter (AttnOut -> Xexp)
-    {
+    { 
 #if DEBUG_LEVEL >= 1
         cout << "\n\nSCATTER" << "\n" << flush;
 #endif
         // Explicitly defining input for clarity
-        float* d_moe_input = d_AttnOut;
+        float* d_moe_input = d_AttnOut; 
 
         ScatterArgs h_args = {d_moe_input, d_eid, d_Xexp, d_pos, d_cnt, T, d, E, cap};
         ScatterArgs* d_args = nullptr;
@@ -892,55 +763,6 @@ int main(int argc, char **argv) {
         dim3 profile_gridD(XCD_NUM); 
         dim3 gridD(target_gridD.x + profile_gridD.x);
 
-        // Solo throughput (target only)
-        {
-            hipEvent_t ev_s, ev_e;
-            gpuErrchk(hipEventCreate(&ev_s));
-            gpuErrchk(hipEventCreate(&ev_e));
-            gpuErrchk(hipMemsetAsync(d_cnt, 0, sizeof(int) * (size_t)E, stream));
-            size_t n_plan_solo = 0;
-            void* kargs_solo[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&n_plan_solo, (void*)&d_out };
-            gpuErrchk(hipEventRecord(ev_s, stream));
-            gpuErrchk(hipLaunchCooperativeKernel(
-                (void*)ppnt::fused_kernel<ScatterTargetFn, ScatterArgs>,
-                dim3(gridD), dim3(blockD), kargs_solo, 0, stream));
-            gpuErrchk(hipEventRecord(ev_e, stream));
-            gpuErrchk(hipStreamSynchronize(stream));
-            float ms = 0;
-            gpuErrchk(hipEventElapsedTime(&ms, ev_s, ev_e));
-            ppnt::log_solo_throughput("Scatter", ms, B_scatter);
-            gpuErrchk(hipEventDestroy(ev_s));
-            gpuErrchk(hipEventDestroy(ev_e));
-        }
-
-        // Co-run throughput (target + k2 ping)
-        if (n_k2plan > 0) {
-            for (size_t pi = 0; pi < n_k2plan; ++pi) {
-                const ppnt::PingSpec& p = h_k2plan[pi];
-                hipEvent_t ev_s, ev_e;
-                gpuErrchk(hipEventCreate(&ev_s));
-                gpuErrchk(hipEventCreate(&ev_e));
-                gpuErrchk(hipMemsetAsync(d_cnt, 0, sizeof(int) * (size_t)E, stream));
-                ppnt::init_moe_clks(h_k2out2, stream);
-                ppnt::PingSpec* d_k2plan_one = d_k2plan + pi;
-                ppnt::PingOut2* d_k2out2_one = d_k2out2 + pi;
-                size_t n_k2plan_one = 1;
-                void* kargs_corun[] = { (void*)&fn, (void*)&d_args, (void*)&d_k2plan_one, (void*)&n_k2plan_one, (void*)&d_k2out2_one };
-                gpuErrchk(hipEventRecord(ev_s, stream));
-                gpuErrchk(hipLaunchCooperativeKernel(
-                    (void*)ppnt::fused_kernel2<ScatterTargetFn, ScatterArgs>,
-                    dim3(gridD), dim3(blockD), kargs_corun, 0, stream));
-                gpuErrchk(hipEventRecord(ev_e, stream));
-                gpuErrchk(hipStreamSynchronize(stream));
-                float ms = 0;
-                gpuErrchk(hipEventElapsedTime(&ms, ev_s, ev_e));
-                ppnt::log_corun_throughput("Scatter", ms, B_scatter, &p);
-                gpuErrchk(hipEventDestroy(ev_s));
-                gpuErrchk(hipEventDestroy(ev_e));
-            }
-        }
-
-        gpuErrchk(hipMemsetAsync(d_cnt, 0, sizeof(int) * (size_t)E, stream));
         gpuErrchk(hipLaunchCooperativeKernel(
             (void*)ppnt::fused_kernel<ScatterTargetFn, ScatterArgs>,
             dim3(gridD), dim3(blockD), kernelArgs, 0, stream));
@@ -959,52 +781,6 @@ int main(int argc, char **argv) {
         gpuErrchk(hipMemcpyAsync(d_args, &h_args, sizeof(Gemm1Args), hipMemcpyHostToDevice, stream));
 
         Gemm1TargetFn fn{};
-        // Solo throughput (target only)
-        {
-            hipEvent_t ev_s, ev_e;
-            gpuErrchk(hipEventCreate(&ev_s));
-            gpuErrchk(hipEventCreate(&ev_e));
-            size_t n_plan_solo = 0;
-            void* kargs_solo[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&n_plan_solo, (void*)&d_out };
-            gpuErrchk(hipEventRecord(ev_s, stream));
-            gpuErrchk(hipLaunchCooperativeKernel(
-                (void*)ppnt::fused_kernel<Gemm1TargetFn, Gemm1Args>,
-                dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs_solo, 0, stream));
-            gpuErrchk(hipEventRecord(ev_e, stream));
-            gpuErrchk(hipStreamSynchronize(stream));
-            float ms = 0;
-            gpuErrchk(hipEventElapsedTime(&ms, ev_s, ev_e));
-            ppnt::log_solo_throughput("FFN1", ms, B_ffn1);
-            gpuErrchk(hipEventDestroy(ev_s));
-            gpuErrchk(hipEventDestroy(ev_e));
-        }
-
-        // Co-run throughput (target + k2 ping)
-        if (n_k2plan > 0) {
-            for (size_t pi = 0; pi < n_k2plan; ++pi) {
-                const ppnt::PingSpec& p = h_k2plan[pi];
-                hipEvent_t ev_s, ev_e;
-                gpuErrchk(hipEventCreate(&ev_s));
-                gpuErrchk(hipEventCreate(&ev_e));
-                ppnt::init_moe_clks(h_k2out2, stream);
-                ppnt::PingSpec* d_k2plan_one = d_k2plan + pi;
-                ppnt::PingOut2* d_k2out2_one = d_k2out2 + pi;
-                size_t n_k2plan_one = 1;
-                void* kargs_corun[] = { (void*)&fn, (void*)&d_args, (void*)&d_k2plan_one, (void*)&n_k2plan_one, (void*)&d_k2out2_one };
-                gpuErrchk(hipEventRecord(ev_s, stream));
-                gpuErrchk(hipLaunchCooperativeKernel(
-                    (void*)ppnt::fused_kernel2<Gemm1TargetFn, Gemm1Args>,
-                    dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs_corun, 0, stream));
-                gpuErrchk(hipEventRecord(ev_e, stream));
-                gpuErrchk(hipStreamSynchronize(stream));
-                float ms = 0;
-                gpuErrchk(hipEventElapsedTime(&ms, ev_s, ev_e));
-                ppnt::log_corun_throughput("FFN1", ms, B_ffn1, &p);
-                gpuErrchk(hipEventDestroy(ev_s));
-                gpuErrchk(hipEventDestroy(ev_e));
-            }
-        }
-
         size_t _n_plan = (PPNT_PROFILE_FFN1) ? n_plan : 0; // set to 0 to bypass ppnt execution
         void* kargs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&_n_plan, (void*)&d_out };
 
@@ -1026,52 +802,6 @@ int main(int argc, char **argv) {
         gpuErrchk(hipMemcpyAsync(d_args, &h_args, sizeof(ReluArgs), hipMemcpyHostToDevice, stream));
 
         ReluTargetFn fn{};
-        // Solo throughput (target only)
-        {
-            hipEvent_t ev_s, ev_e;
-            gpuErrchk(hipEventCreate(&ev_s));
-            gpuErrchk(hipEventCreate(&ev_e));
-            size_t n_plan_solo = 0;
-            void* kargs_solo[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&n_plan_solo, (void*)&d_out };
-            gpuErrchk(hipEventRecord(ev_s, stream));
-            gpuErrchk(hipLaunchCooperativeKernel(
-                (void*)ppnt::fused_kernel<ReluTargetFn, ReluArgs>,
-                dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs_solo, 0, stream));
-            gpuErrchk(hipEventRecord(ev_e, stream));
-            gpuErrchk(hipStreamSynchronize(stream));
-            float ms = 0;
-            gpuErrchk(hipEventElapsedTime(&ms, ev_s, ev_e));
-            ppnt::log_solo_throughput("ReLU", ms, B_relu);
-            gpuErrchk(hipEventDestroy(ev_s));
-            gpuErrchk(hipEventDestroy(ev_e));
-        }
-
-        // Co-run throughput (target + k2 ping)
-        if (n_k2plan > 0) {
-            for (size_t pi = 0; pi < n_k2plan; ++pi) {
-                const ppnt::PingSpec& p = h_k2plan[pi];
-                hipEvent_t ev_s, ev_e;
-                gpuErrchk(hipEventCreate(&ev_s));
-                gpuErrchk(hipEventCreate(&ev_e));
-                ppnt::init_moe_clks(h_k2out2, stream);
-                ppnt::PingSpec* d_k2plan_one = d_k2plan + pi;
-                ppnt::PingOut2* d_k2out2_one = d_k2out2 + pi;
-                size_t n_k2plan_one = 1;
-                void* kargs_corun[] = { (void*)&fn, (void*)&d_args, (void*)&d_k2plan_one, (void*)&n_k2plan_one, (void*)&d_k2out2_one };
-                gpuErrchk(hipEventRecord(ev_s, stream));
-                gpuErrchk(hipLaunchCooperativeKernel(
-                    (void*)ppnt::fused_kernel2<ReluTargetFn, ReluArgs>,
-                    dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs_corun, 0, stream));
-                gpuErrchk(hipEventRecord(ev_e, stream));
-                gpuErrchk(hipStreamSynchronize(stream));
-                float ms = 0;
-                gpuErrchk(hipEventElapsedTime(&ms, ev_s, ev_e));
-                ppnt::log_corun_throughput("ReLU", ms, B_relu, &p);
-                gpuErrchk(hipEventDestroy(ev_s));
-                gpuErrchk(hipEventDestroy(ev_e));
-            }
-        }
-
         size_t _n_plan = (PPNT_PROFILE_RELU) ? n_plan : 0; // set to 0 to bypass ppnt execution
         void* kargs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&_n_plan, (void*)&d_out };
 
@@ -1093,52 +823,6 @@ int main(int argc, char **argv) {
         gpuErrchk(hipMemcpyAsync(d_args, &h_args, sizeof(Gemm2Args), hipMemcpyHostToDevice, stream));
 
         Gemm2TargetFn fn{};
-        // Solo throughput (target only)
-        {
-            hipEvent_t ev_s, ev_e;
-            gpuErrchk(hipEventCreate(&ev_s));
-            gpuErrchk(hipEventCreate(&ev_e));
-            size_t n_plan_solo = 0;
-            void* kargs_solo[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&n_plan_solo, (void*)&d_out };
-            gpuErrchk(hipEventRecord(ev_s, stream));
-            gpuErrchk(hipLaunchCooperativeKernel(
-                (void*)ppnt::fused_kernel<Gemm2TargetFn, Gemm2Args>,
-                dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs_solo, 0, stream));
-            gpuErrchk(hipEventRecord(ev_e, stream));
-            gpuErrchk(hipStreamSynchronize(stream));
-            float ms = 0;
-            gpuErrchk(hipEventElapsedTime(&ms, ev_s, ev_e));
-            ppnt::log_solo_throughput("FFN2", ms, B_ffn2);
-            gpuErrchk(hipEventDestroy(ev_s));
-            gpuErrchk(hipEventDestroy(ev_e));
-        }
-
-        // Co-run throughput (target + k2 ping)
-        if (n_k2plan > 0) {
-            for (size_t pi = 0; pi < n_k2plan; ++pi) {
-                const ppnt::PingSpec& p = h_k2plan[pi];
-                hipEvent_t ev_s, ev_e;
-                gpuErrchk(hipEventCreate(&ev_s));
-                gpuErrchk(hipEventCreate(&ev_e));
-                ppnt::init_moe_clks(h_k2out2, stream);
-                ppnt::PingSpec* d_k2plan_one = d_k2plan + pi;
-                ppnt::PingOut2* d_k2out2_one = d_k2out2 + pi;
-                size_t n_k2plan_one = 1;
-                void* kargs_corun[] = { (void*)&fn, (void*)&d_args, (void*)&d_k2plan_one, (void*)&n_k2plan_one, (void*)&d_k2out2_one };
-                gpuErrchk(hipEventRecord(ev_s, stream));
-                gpuErrchk(hipLaunchCooperativeKernel(
-                    (void*)ppnt::fused_kernel2<Gemm2TargetFn, Gemm2Args>,
-                    dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs_corun, 0, stream));
-                gpuErrchk(hipEventRecord(ev_e, stream));
-                gpuErrchk(hipStreamSynchronize(stream));
-                float ms = 0;
-                gpuErrchk(hipEventElapsedTime(&ms, ev_s, ev_e));
-                ppnt::log_corun_throughput("FFN2", ms, B_ffn2, &p);
-                gpuErrchk(hipEventDestroy(ev_s));
-                gpuErrchk(hipEventDestroy(ev_e));
-            }
-        }
-
         size_t _n_plan = (PPNT_PROFILE_FFN2) ? n_plan : 0; // set to 0 to bypass ppnt execution
         void* kargs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&_n_plan, (void*)&d_out };
 
@@ -1160,52 +844,6 @@ int main(int argc, char **argv) {
         gpuErrchk(hipMemcpyAsync(d_args, &h_args, sizeof(GatherArgs), hipMemcpyHostToDevice, stream));
 
         GatherTargetFn fn{};
-        // Solo throughput (target only)
-        {
-            hipEvent_t ev_s, ev_e;
-            gpuErrchk(hipEventCreate(&ev_s));
-            gpuErrchk(hipEventCreate(&ev_e));
-            size_t n_plan_solo = 0;
-            void* kargs_solo[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&n_plan_solo, (void*)&d_out };
-            gpuErrchk(hipEventRecord(ev_s, stream));
-            gpuErrchk(hipLaunchCooperativeKernel(
-                (void*)ppnt::fused_kernel<GatherTargetFn, GatherArgs>,
-                dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs_solo, 0, stream));
-            gpuErrchk(hipEventRecord(ev_e, stream));
-            gpuErrchk(hipStreamSynchronize(stream));
-            float ms = 0;
-            gpuErrchk(hipEventElapsedTime(&ms, ev_s, ev_e));
-            ppnt::log_solo_throughput("Gather", ms, B_gather);
-            gpuErrchk(hipEventDestroy(ev_s));
-            gpuErrchk(hipEventDestroy(ev_e));
-        }
-
-        // Co-run throughput (target + k2 ping)
-        if (n_k2plan > 0) {
-            for (size_t pi = 0; pi < n_k2plan; ++pi) {
-                const ppnt::PingSpec& p = h_k2plan[pi];
-                hipEvent_t ev_s, ev_e;
-                gpuErrchk(hipEventCreate(&ev_s));
-                gpuErrchk(hipEventCreate(&ev_e));
-                ppnt::init_moe_clks(h_k2out2, stream);
-                ppnt::PingSpec* d_k2plan_one = d_k2plan + pi;
-                ppnt::PingOut2* d_k2out2_one = d_k2out2 + pi;
-                size_t n_k2plan_one = 1;
-                void* kargs_corun[] = { (void*)&fn, (void*)&d_args, (void*)&d_k2plan_one, (void*)&n_k2plan_one, (void*)&d_k2out2_one };
-                gpuErrchk(hipEventRecord(ev_s, stream));
-                gpuErrchk(hipLaunchCooperativeKernel(
-                    (void*)ppnt::fused_kernel2<GatherTargetFn, GatherArgs>,
-                    dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs_corun, 0, stream));
-                gpuErrchk(hipEventRecord(ev_e, stream));
-                gpuErrchk(hipStreamSynchronize(stream));
-                float ms = 0;
-                gpuErrchk(hipEventElapsedTime(&ms, ev_s, ev_e));
-                ppnt::log_corun_throughput("Gather", ms, B_gather, &p);
-                gpuErrchk(hipEventDestroy(ev_s));
-                gpuErrchk(hipEventDestroy(ev_e));
-            }
-        }
-
         size_t _n_plan = (PPNT_PROFILE_GATHER) ? n_plan : 0; // set to 0 to bypass ppnt execution
         void* kargs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan, (void*)&_n_plan, (void*)&d_out };
 

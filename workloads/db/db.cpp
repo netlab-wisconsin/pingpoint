@@ -10,13 +10,13 @@
 #include <algorithm>
 #include <cinttypes>
 
-#include "../mem_bench/gpu-clock.cuh"
-#include "../mem_bench/MeasurementSeries.hpp"
+#include "../../mem_bench/gpu-clock.cuh"
+#include "../../mem_bench/MeasurementSeries.hpp"
 
-#include "../test/main.h"
-#include "../test/ppnt.h"
-#include "../test/k1.h"
-#include "../test/k2.h"
+#include "main.h"
+#include "ppnt.h"
+#include "k1.h"
+#include "k2.h"
 
 #include "db.h"
 

@@ -16,6 +16,6 @@ gpucore.*
 .tmp
 *.csv
 
-workloads/
 temp/
 results/
+results-*/
