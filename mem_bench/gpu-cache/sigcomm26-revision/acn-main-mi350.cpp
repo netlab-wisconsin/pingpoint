@@ -349,8 +349,8 @@ int main(int argc, char **argv)
 
 #if 1 // for logging
     // L1 range
-    measure<1 * 256, 256>();
-    measure<3 * 256, 256>();
+    // measure<1 * 256, 256>();
+    // measure<3 * 256, 256>();
 
     // L2 range
     // measure<8 * 256, 256>(); // 64KB, skip
@@ -384,9 +384,11 @@ int main(int argc, char **argv)
     // measure<expSeries(28), 512>();
     // measure<expSeries(32), 512>();
     // measure<expSeries(36), 512>();
-    // measure<expSeries(40), 512>();
-    // measure<expSeries(44), 512>();
-    // measure<expSeries(48), 512>();
+
+    // HBM range
+    measure<expSeries(40), 512>();
+    measure<expSeries(44), 512>();
+    measure<expSeries(48), 512>();
 
 
 #else

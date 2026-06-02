@@ -11,7 +11,7 @@ LDFLAGS 	:= -L$(HIP_HOME)/lib/rocprofiler -lrocprofiler64 -lhsa-runtime64 -lrocm
 NAME 		:= main
 PREFIX		:= acn
 ARCH		:= mi350
-SUFFIX		:= L1 # Set accordingly!
+SUFFIX		:=  # Set accordingly!
 
 all: $(BIN_DIR)/$(PREFIX)-$(NAME)-hop0-$(ARCH)-$(SUFFIX) \
 	$(BIN_DIR)/$(PREFIX)-$(NAME)-hop1-$(ARCH)-$(SUFFIX)
