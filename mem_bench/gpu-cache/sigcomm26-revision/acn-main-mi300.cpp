@@ -350,7 +350,7 @@ int main(int argc, char **argv)
 
     initMeasureMetric();
 
-#if 1 // for logging
+#if 1 // for logging. 06/02/2026.
     // L1 range
     // measure<1 * 256, 256>();
     // measure<3 * 256, 256>();
@@ -387,11 +387,26 @@ int main(int argc, char **argv)
     // measure<expSeries(28), 512>();
     // measure<expSeries(32), 512>();
     // measure<expSeries(36), 512>();
+    // measure<expSeries(40), 512>();
+    // measure<expSeries(44), 512>();
 
     // HBM range
-    measure<expSeries(40), 512>();
-    measure<expSeries(44), 512>();
-    measure<expSeries(48), 512>();
+    // measure<expSeries(45), 512>();
+    // measure<expSeries(46), 512>();
+    // measure<expSeries(47), 512>();
+    // measure<expSeries(48), 512>();
+    // measure<expSeries(49), 512>();
+    // measure<expSeries(50), 512>();
+    // measure<expSeries(51), 512>();
+    // measure<expSeries(52), 512>();
+    // measure<expSeries(53), 512>();
+    // measure<expSeries(54), 512>();
+    // measure<expSeries(55), 512>();
+    // measure<expSeries(56), 512>();
+    // measure<expSeries(57), 512>();
+    // measure<expSeries(58), 512>();
+    // measure<expSeries(59), 512>();
+    // measure<expSeries(60), 512>();
 
 
 #else
