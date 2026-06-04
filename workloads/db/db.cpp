@@ -152,6 +152,119 @@ static void log_tput_impact(
            tag, solo_ms, solo_tput, unit, corun_ms, n_replays, corun_per_ping_ms, corun_tput, unit, drop_pct, slowdown);
 }
 
+static void normalize_vec(float *v)
+{
+    double ss = 0.0;
+    for (int d = 0; d < DB_ENTRY_DIM; d++) ss += (double)v[d] * (double)v[d];
+    double inv = (ss > 0.0) ? (1.0 / sqrt(ss)) : 1.0;
+    for (int d = 0; d < DB_ENTRY_DIM; d++) v[d] = (float)(v[d] * inv);
+}
+
+static void fill_noisy_centroid_vec(
+    float *dst, const vector<float> &centroids, int centroid_id,
+    mt19937 &rng, normal_distribution<float> &noise_dist)
+{
+    const float *centroid = centroids.data() + (size_t)centroid_id * DB_ENTRY_DIM;
+    for (int d = 0; d < DB_ENTRY_DIM; d++)
+        dst[d] = centroid[d] + noise_dist(rng);
+    normalize_vec(dst);
+}
+
+static void build_synthetic_ann_dataset(
+    int Q, int N_COLD, const uint64_t *d_hot_chunk_ptrs,
+    float *d_query_vecs, float *d_cold_entries, int *d_candidate_ids)
+{
+    const int hot_centroids = DB_HOT_CENTROIDS;
+    const int cold_centroids = max(1, (N_COLD + DB_LIST_SIZE - 1) / DB_LIST_SIZE);
+    const int total_centroids = hot_centroids + cold_centroids;
+
+    mt19937 rng(789);
+    uniform_real_distribution<float> centroid_dist(-1.0f, 1.0f);
+    normal_distribution<float> entry_noise(0.0f, 0.05f);
+    normal_distribution<float> query_noise(0.0f, 0.08f);
+
+    vector<float> centroids((size_t)total_centroids * DB_ENTRY_DIM);
+    for (int c = 0; c < total_centroids; c++) {
+        float *centroid = centroids.data() + (size_t)c * DB_ENTRY_DIM;
+        for (int d = 0; d < DB_ENTRY_DIM; d++)
+            centroid[d] = centroid_dist(rng);
+        normalize_vec(centroid);
+    }
+
+    vector<float> h_hot_entries((size_t)N_HOT_CHUNKS * DB_ENTRY_DIM);
+    for (int i = 0; i < N_HOT_CHUNKS; i++) {
+        int centroid_id = i / DB_LIST_SIZE;
+        fill_noisy_centroid_vec(h_hot_entries.data() + (size_t)i * DB_ENTRY_DIM,
+                                centroids, centroid_id, rng, entry_noise);
+    }
+
+    vector<uint64_t> h_hot_ptrs(N_HOT_CHUNKS);
+    gpuErrchk(hipMemcpy(h_hot_ptrs.data(), d_hot_chunk_ptrs,
+                        sizeof(uint64_t) * N_HOT_CHUNKS, hipMemcpyDeviceToHost));
+    for (int i = 0; i < N_HOT_CHUNKS; i++) {
+        gpuErrchk(hipMemcpy(reinterpret_cast<void *>(h_hot_ptrs[i]),
+                            h_hot_entries.data() + (size_t)i * DB_ENTRY_DIM,
+                            sizeof(float) * DB_ENTRY_DIM, hipMemcpyHostToDevice));
+    }
+
+    vector<float> h_cold_entries((size_t)N_COLD * DB_ENTRY_DIM);
+    for (int i = 0; i < N_COLD; i++) {
+        int centroid_id = hot_centroids + (i / DB_LIST_SIZE) % cold_centroids;
+        fill_noisy_centroid_vec(h_cold_entries.data() + (size_t)i * DB_ENTRY_DIM,
+                                centroids, centroid_id, rng, entry_noise);
+    }
+    gpuErrchk(hipMemcpy(d_cold_entries, h_cold_entries.data(),
+                        sizeof(float) * (size_t)N_COLD * DB_ENTRY_DIM,
+                        hipMemcpyHostToDevice));
+
+    vector<double> hot_weights(hot_centroids);
+    for (int c = 0; c < hot_centroids; c++)
+        hot_weights[c] = 1.0 / pow((double)c + 1.0, 0.7);
+    discrete_distribution<int> hot_centroid_dist(hot_weights.begin(), hot_weights.end());
+    uniform_int_distribution<int> cold_centroid_dist(0, cold_centroids - 1);
+    uniform_int_distribution<int> pct_dist(0, 99);
+
+    vector<float> h_query_vecs((size_t)Q * DB_ENTRY_DIM);
+    vector<int> h_candidate_ids((size_t)Q * DB_CANDIDATES_PER_QUERY);
+    int hot_queries = 0;
+    for (int q = 0; q < Q; q++) {
+        bool is_hot = pct_dist(rng) < HOT_FRAC_PCT;
+        int list_base;
+        int centroid_id;
+        if (is_hot) {
+            hot_queries++;
+            int hot_c = hot_centroid_dist(rng);
+            centroid_id = hot_c;
+            list_base = hot_c * DB_LIST_SIZE;
+            for (int ci = 0; ci < DB_CANDIDATES_PER_QUERY; ci++)
+                h_candidate_ids[(size_t)q * DB_CANDIDATES_PER_QUERY + ci] =
+                    list_base + (ci % DB_LIST_SIZE);
+        } else {
+            int cold_c = cold_centroid_dist(rng);
+            centroid_id = hot_centroids + cold_c;
+            list_base = cold_c * DB_LIST_SIZE;
+            for (int ci = 0; ci < DB_CANDIDATES_PER_QUERY; ci++) {
+                int cold_id = (list_base + ci) % N_COLD;
+                h_candidate_ids[(size_t)q * DB_CANDIDATES_PER_QUERY + ci] =
+                    N_HOT_CHUNKS + cold_id;
+            }
+        }
+        fill_noisy_centroid_vec(h_query_vecs.data() + (size_t)q * DB_ENTRY_DIM,
+                                centroids, centroid_id, rng, query_noise);
+    }
+
+    gpuErrchk(hipMemcpy(d_query_vecs, h_query_vecs.data(),
+                        sizeof(float) * (size_t)Q * DB_ENTRY_DIM,
+                        hipMemcpyHostToDevice));
+    gpuErrchk(hipMemcpy(d_candidate_ids, h_candidate_ids.data(),
+                        sizeof(int) * (size_t)Q * DB_CANDIDATES_PER_QUERY,
+                        hipMemcpyHostToDevice));
+
+    printf("[DB ANN] centroids: hot=%d cold=%d list_size=%d candidates/query=%d hot_queries=%d/%d\n",
+           hot_centroids, cold_centroids, DB_LIST_SIZE, DB_CANDIDATES_PER_QUERY,
+           hot_queries, Q);
+}
+
 int main(int argc, char **argv) {
 
     // @june: gpu clock set to 2100 as mi3008x node reports incorrect clock values
@@ -463,61 +576,66 @@ int main(int argc, char **argv) {
     }
 
     // ------------------------------------------------------------------
-    // Wire up hot-table and local-table chunk pointer arrays.
-    //
-    // k2_d_chunks_per_hbm[0] is an already-allocated device array of
-    // uint64_t where each element is the device address of a 2KB slab
-    // physically in the HBM identified by home_identification.
-    // k2_h_offsets[0][hbm] is the start index for that HBM's slabs.
-    //
-    // Layout within HOT_HBM's section:
-    //   [0 .. N_HOT_CHUNKS-1]          → VecScan hot-table reads
-    //   [N_HOT_CHUNKS .. 2*N_HOT_CHUNKS-1] → AtomicAgg hot-table writes
+    // VecScan owns its embedding placement buffer.  This keeps the ANN data
+    // independent from K2 ping buffers and works even when K2 plans are off.
     // ------------------------------------------------------------------
-#if !(DISABLE_K2_PLANS)
-    assert(k2_min_num_chunks_over_n_datas[HOT_HBM]   >= N_HOT_CHUNKS &&
-           "need N_HOT_CHUNKS chunks in HOT_HBM");
-    assert(k2_min_num_chunks_over_n_datas[LOCAL_HBM]  >= N_HOT_CHUNKS &&
-           "need N_HOT_CHUNKS chunks in LOCAL_HBM");
-    assert(k2_min_num_chunks_over_n_datas[XCD23_HBM]  >= N_HOT_CHUNKS &&
-           "need N_HOT_CHUNKS chunks in XCD23_HBM");
+    char *db_vecscan_raw = nullptr;
+    gpuErrchk(hipMalloc(&db_vecscan_raw, DB_VECSCAN_DATA_SIZE + 0x1000));
+    char *db_vecscan_data = (char *)(((uintptr_t)db_vecscan_raw & ~(uintptr_t)0x0FFF) + 0x1000);
+    const size_t db_vecscan_n_chunks = DB_VECSCAN_DATA_SIZE / CHUNK_SIZE;
 
-    // VecScan hot path: N_HOT_CHUNKS slabs in HOT_HBM (8MB total)
-    uint64_t *d_hot_chunk_ptrs   = k2_d_chunks_per_hbm[0] + k2_h_offsets[0][HOT_HBM];
-    // VecScan migration path: N_HOT_CHUNKS slabs in LOCAL_HBM (8MB total)
-    uint64_t *d_local_chunk_ptrs = k2_d_chunks_per_hbm[0] + k2_h_offsets[0][LOCAL_HBM];
-    // VecScan XCD2/XCD3 focused experiment: N_HOT_CHUNKS slabs in XCD23_HBM
-    uint64_t *d_hbm6_chunk_ptrs  = k2_d_chunks_per_hbm[0] + k2_h_offsets[0][XCD23_HBM];
-#else
-    printf("[DB] WARNING: K2 disabled; hot table is not pinned to HOT_HBM.\n");
-    // Without K2, allocate a stub pointer array on the device (no HBM guarantee).
-    uint64_t *d_hot_chunk_ptrs   = nullptr;
-    uint64_t *d_local_chunk_ptrs = nullptr;
-    uint64_t *d_hbm6_chunk_ptrs  = nullptr;
-    // (In practice, re-enable K2 to get meaningful HBM-placement results.)
+    vector<uint32_t> db_chunk_home_xcd;
+    vector<vector<uint64_t>> db_chunks_per_hbm;
+    if (db::home_identification(db_vecscan_data, DB_VECSCAN_DATA_SIZE,
+                                db_vecscan_n_chunks, db_chunk_home_xcd,
+                                db_chunks_per_hbm) == -1)
+        return -1;
+
+    for (int v : {HOT_HBM, LOCAL_HBM, XCD23_HBM}) {
+        if (db_chunks_per_hbm[v].size() < N_HOT_CHUNKS) {
+            fprintf(stderr, "[DB] HBM%d has only %zu VecScan chunks; need %d\n",
+                    v, db_chunks_per_hbm[v].size(), N_HOT_CHUNKS);
+            return 1;
+        }
+    }
+
+#if DEBUG_LEVEL >= 1
+    for (int v = 0; v < HBM_NUM; v++) {
+        size_t bytes = db_chunks_per_hbm[v].size() * CHUNK_SIZE;
+        string level = bytes > L2_SIZE ? (bytes > LLC_SIZE ? "hbm" : "llc") : "l2";
+        cout << "DB VecScan pinned data: hbm" << v << " "
+             << bytes / (1024 * 1024) << "MB at " << level << "\n" << flush;
+    }
 #endif
 
-    // Allocate and fill query vectors, cold entries, aggregation inputs
+    auto make_db_chunk_ptrs = [](const vector<uint64_t> &chunks) {
+        uint64_t *d_ptrs = nullptr;
+        gpuErrchk(hipMalloc(&d_ptrs, sizeof(uint64_t) * N_HOT_CHUNKS));
+        gpuErrchk(hipMemcpy(d_ptrs, chunks.data(), sizeof(uint64_t) * N_HOT_CHUNKS,
+                            hipMemcpyHostToDevice));
+        return d_ptrs;
+    };
+
+    uint64_t *d_hot_chunk_ptrs   = make_db_chunk_ptrs(db_chunks_per_hbm[HOT_HBM]);
+    uint64_t *d_local_chunk_ptrs = make_db_chunk_ptrs(db_chunks_per_hbm[LOCAL_HBM]);
+    uint64_t *d_hbm6_chunk_ptrs  = make_db_chunk_ptrs(db_chunks_per_hbm[XCD23_HBM]);
+
+    // Allocate and fill synthetic IVF-like ANN corpus, queries, and candidate lists.
     float *d_query_vecs  = nullptr;
     float *d_cold_entries = nullptr;
     float *d_results      = nullptr;
+    int   *d_candidate_ids = nullptr;
+    int   *d_result_ids    = nullptr;
 
     gpuErrchk(hipMalloc(&d_query_vecs,   sizeof(float) * (size_t)Q      * DB_ENTRY_DIM));
     gpuErrchk(hipMalloc(&d_cold_entries, sizeof(float) * (size_t)N_COLD * DB_ENTRY_DIM));
     gpuErrchk(hipMalloc(&d_results,      sizeof(float) * Q));
+    gpuErrchk(hipMalloc(&d_candidate_ids,
+                        sizeof(int) * (size_t)Q * DB_CANDIDATES_PER_QUERY));
+    gpuErrchk(hipMalloc(&d_result_ids,   sizeof(int)   * Q));
 
-    {
-        float *h = new float[(size_t)Q * DB_ENTRY_DIM];
-        db_fill_random(h, (size_t)Q * DB_ENTRY_DIM);
-        gpuErrchk(hipMemcpy(d_query_vecs, h, sizeof(float) * Q * DB_ENTRY_DIM, hipMemcpyHostToDevice));
-        delete[] h;
-    }
-    {
-        float *h = new float[(size_t)N_COLD * DB_ENTRY_DIM];
-        db_fill_random(h, (size_t)N_COLD * DB_ENTRY_DIM);
-        gpuErrchk(hipMemcpy(d_cold_entries, h, sizeof(float) * N_COLD * DB_ENTRY_DIM, hipMemcpyHostToDevice));
-        delete[] h;
-    }
+    build_synthetic_ann_dataset(Q, N_COLD, d_hbm6_chunk_ptrs,
+                                d_query_vecs, d_cold_entries, d_candidate_ids);
     gpuErrchk(hipStreamSynchronize(stream));
 
     // =========================================================================
@@ -543,10 +661,10 @@ int main(int argc, char **argv) {
         gpuErrchk(hipFree(d_args));
     }
 
-    // 1. VecScan — XCD2 and XCD3 only, 90% hot queries to HBM6
+    // 1. VecScan — XCD2 and XCD3 only, 90% hot queries scan HBM6 candidate lists
     //    All other XCDs skip the query loop entirely (active_xcd_mask gates them out).
     {
-        printf("\n\nVECSCAN (XCD2+XCD3 only, hot entry in HBM%d)\n", XCD23_HBM);
+        printf("\n\nVECSCAN (XCD2+XCD3 only, hot candidate lists in HBM%d)\n", XCD23_HBM);
         uint64_t *d_blk_start = nullptr, *d_blk_end = nullptr;
         int      *d_blk_nq    = nullptr;
         gpuErrchk(hipMalloc(&d_blk_start, sizeof(uint64_t) * physical_grid_size));
@@ -558,8 +676,9 @@ int main(int argc, char **argv) {
         gpuErrchk(hipMemset(d_q_lat, 0, sizeof(uint64_t) * Q));
         gpuErrchk(hipMalloc(&d_q_bid, sizeof(uint32_t) * Q));
         const int xcd23_mask = (1 << 2) | (1 << 3);
-        VecScanArgs h_args = {d_hbm6_chunk_ptrs, d_cold_entries, d_query_vecs, d_results,
-                              Q, N_COLD, HOT_FRAC_PCT,
+        VecScanArgs h_args = {d_hbm6_chunk_ptrs, d_cold_entries, d_query_vecs,
+                              d_candidate_ids, d_results, d_result_ids,
+                              Q, N_COLD, DB_CANDIDATES_PER_QUERY,
                               d_blk_start, d_blk_end, d_blk_nq, d_q_lat, d_q_bid,
                               xcd23_mask};
         VecScanArgs *d_args = nullptr;
@@ -593,6 +712,15 @@ int main(int argc, char **argv) {
         gpuErrchk(hipFree(d_q_bid));     gpuErrchk(hipFree(d_args));
     }
 
+    gpuErrchk(hipFree(d_query_vecs));
+    gpuErrchk(hipFree(d_cold_entries));
+    gpuErrchk(hipFree(d_results));
+    gpuErrchk(hipFree(d_candidate_ids));
+    gpuErrchk(hipFree(d_result_ids));
+    gpuErrchk(hipFree(d_hot_chunk_ptrs));
+    gpuErrchk(hipFree(d_local_chunk_ptrs));
+    gpuErrchk(hipFree(d_hbm6_chunk_ptrs));
+    gpuErrchk(hipFree(db_vecscan_raw));
     gpuErrchk(hipStreamDestroy(stream));
     return 0;
 }
