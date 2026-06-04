@@ -148,6 +148,23 @@ static void log_tput_impact(
            tag, solo_ms, solo_tput, unit, corun_ms, n_replays, corun_per_ping_ms, corun_tput, unit, drop_pct, slowdown);
 }
 
+static int count_vecscan_queries_for_xcd(
+    int Q, int physical_grid_size, int active_xcd, int n_ppnt_tbs_in_xcd)
+{
+    int n_tbs_in_xcd = physical_grid_size / XCD_NUM;
+    int logical_grid_sz = (n_tbs_in_xcd - n_ppnt_tbs_in_xcd) * XCD_NUM;
+    if (logical_grid_sz <= 0) return 0;
+
+    int count = 0;
+    for (int local = n_ppnt_tbs_in_xcd; local < n_tbs_in_xcd; local++) {
+        int logical_bid = active_xcd * (n_tbs_in_xcd - n_ppnt_tbs_in_xcd)
+                        + (local - n_ppnt_tbs_in_xcd);
+        if (logical_bid < Q)
+            count += 1 + (Q - 1 - logical_bid) / logical_grid_sz;
+    }
+    return count;
+}
+
 static void normalize_vec(float *v)
 {
     double ss = 0.0;
@@ -743,8 +760,12 @@ int main(int argc, char **argv) {
     }
 
     auto run_vecscan = [&](const char *placement_name, int hbm, uint64_t *d_hot_chunk_ptrs) {
+        int active_queries = count_vecscan_queries_for_xcd(
+            Q, physical_grid_size, DB_VECSCAN_ACTIVE_XCD, 0);
         printf("\n\nVECSCAN %s (XCD%d only, hot candidate lists in HBM%d)\n",
                placement_name, DB_VECSCAN_ACTIVE_XCD, hbm);
+        printf("[DB] active VecScan queries on XCD%d: %d/%d\n",
+               DB_VECSCAN_ACTIVE_XCD, active_queries, Q);
         uint64_t *d_blk_start = nullptr, *d_blk_end = nullptr;
         int      *d_blk_nq    = nullptr;
         gpuErrchk(hipMalloc(&d_blk_start, sizeof(uint64_t) * physical_grid_size));
@@ -785,7 +806,8 @@ int main(int argc, char **argv) {
         char vecscan_tag[64];
         snprintf(vecscan_tag, sizeof(vecscan_tag), "VECSCAN %s XCD%d@HBM%d",
                  placement_name, DB_VECSCAN_ACTIVE_XCD, hbm);
-        log_tput_impact(vecscan_tag, (double)Q, "QPS", solo_ms, corun_ms, _n_plan);
+        log_tput_impact(vecscan_tag, (double)active_queries, "QPS",
+                        solo_ms, corun_ms, _n_plan);
         ppnt::parse_pingouts(d_plan, d_out, _n_plan, TARGET_BLOCKDIM_X, clock);
         parse_vecscan_qps(d_blk_start, d_blk_end, d_blk_nq,
                           physical_grid_size, physical_grid_size / XCD_NUM, clock);

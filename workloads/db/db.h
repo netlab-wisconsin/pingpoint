@@ -37,8 +37,14 @@ namespace db_cg = cooperative_groups;
 
 // Synthetic IVF-like ANN shape.  The hot corpus is stored as N_HOT_CHUNKS
 // vector chunks, split into centroid posting lists of DB_LIST_SIZE vectors.
+#ifndef DB_LIST_SIZE
 #define DB_LIST_SIZE 64
+#endif
+
+#ifndef DB_CANDIDATES_PER_QUERY
 #define DB_CANDIDATES_PER_QUERY 64
+#endif
+
 #define DB_NPROBE ((DB_CANDIDATES_PER_QUERY + DB_LIST_SIZE - 1) / DB_LIST_SIZE)
 #define DB_HOT_CENTROIDS ((N_HOT_CHUNKS + DB_LIST_SIZE - 1) / DB_LIST_SIZE)
 

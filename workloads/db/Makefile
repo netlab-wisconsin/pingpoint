@@ -13,6 +13,9 @@ LDFLAGS  := -L$(HIP_HOME)/lib/rocprofiler -lrocprofiler64 -lhsa-runtime64 -lrocm
 
 DB_ALL_TARGET := $(BIN_DIR)/db_all
 
+DB_LIST_SIZE := 64
+DB_CANDIDATES_PER_QUERY := 64
+
 .PHONY: all clean
 
 all: $(DB_ALL_TARGET)
@@ -23,6 +26,8 @@ $(BIN_DIR):
 $(DB_ALL_TARGET): db.cpp db.h \
                   ppnt.h main.h k1.h k2.h | $(BIN_DIR)
 	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) \
+	-DDB_LIST_SIZE=$(DB_LIST_SIZE) \
+	-DDB_CANDIDATES_PER_QUERY=$(DB_CANDIDATES_PER_QUERY) \
 	-o $@ $<
 
 clean:
