@@ -35,10 +35,6 @@
 #define DISABLE_K1_PLANS 1
 #define DISABLE_K2_PLANS 1
 
-// Which DB stages to co-profile with pings
-#define PPNT_PROFILE_VECSCAN_HOT   1   // VecScan, hot entry in HOT_HBM  (bad placement)
-#define PPNT_PROFILE_VECSCAN_LOCAL 1   // VecScan, hot entry in LOCAL_HBM (after migration)
-
 #define TARGET_BLOCKDIM_X 1024
 
 using namespace std;
@@ -244,7 +240,9 @@ static int db_make_candidate_id(
 }
 
 static void build_synthetic_ann_dataset(
-    int Q, int N_COLD, const uint64_t *d_hot_chunk_ptrs,
+    int Q, int N_COLD,
+    const uint64_t *d_original_hot_chunk_ptrs,
+    const uint64_t *d_migrated_hot_chunk_ptrs,
     float *d_query_vecs, float *d_cold_entries, int *d_candidate_ids)
 {
     const int hot_centroids = DB_HOT_CENTROIDS;
@@ -271,13 +269,18 @@ static void build_synthetic_ann_dataset(
                                 centroids, centroid_id, rng, entry_noise);
     }
 
-    vector<uint64_t> h_hot_ptrs(N_HOT_CHUNKS);
-    gpuErrchk(hipMemcpy(h_hot_ptrs.data(), d_hot_chunk_ptrs,
+    vector<uint64_t> h_original_hot_ptrs(N_HOT_CHUNKS);
+    vector<uint64_t> h_migrated_hot_ptrs(N_HOT_CHUNKS);
+    gpuErrchk(hipMemcpy(h_original_hot_ptrs.data(), d_original_hot_chunk_ptrs,
+                        sizeof(uint64_t) * N_HOT_CHUNKS, hipMemcpyDeviceToHost));
+    gpuErrchk(hipMemcpy(h_migrated_hot_ptrs.data(), d_migrated_hot_chunk_ptrs,
                         sizeof(uint64_t) * N_HOT_CHUNKS, hipMemcpyDeviceToHost));
     for (int i = 0; i < N_HOT_CHUNKS; i++) {
-        gpuErrchk(hipMemcpy(reinterpret_cast<void *>(h_hot_ptrs[i]),
-                            h_hot_entries.data() + (size_t)i * DB_ENTRY_DIM,
-                            sizeof(float) * DB_ENTRY_DIM, hipMemcpyHostToDevice));
+        const float *src = h_hot_entries.data() + (size_t)i * DB_ENTRY_DIM;
+        gpuErrchk(hipMemcpy(reinterpret_cast<void *>(h_original_hot_ptrs[i]),
+                            src, sizeof(float) * DB_ENTRY_DIM, hipMemcpyHostToDevice));
+        gpuErrchk(hipMemcpy(reinterpret_cast<void *>(h_migrated_hot_ptrs[i]),
+                            src, sizeof(float) * DB_ENTRY_DIM, hipMemcpyHostToDevice));
     }
 
     vector<float> h_cold_entries((size_t)N_COLD * DB_ENTRY_DIM);
@@ -628,8 +631,11 @@ int main(int argc, char **argv) {
     const int N_COLD  = max(Q, 1024);
     const int N_TOTAL = N_HOT + N_COLD;
 
-    printf("[DB] Q=%d N_TOTAL=%d N_HOT=%d N_COLD=%d DB_ENTRY_DIM=%d HOT_HBM=%d LOCAL_HBM=%d\n",
-           Q, N_TOTAL, N_HOT, N_COLD, DB_ENTRY_DIM, HOT_HBM, LOCAL_HBM);
+    printf("[DB] Q=%d N_TOTAL=%d N_HOT=%d N_COLD=%d DB_ENTRY_DIM=%d "
+           "VECSCAN_XCD=%d ORIGINAL_HBM=%d MIGRATED_HBM=%d\n",
+           Q, N_TOTAL, N_HOT, N_COLD, DB_ENTRY_DIM,
+           DB_VECSCAN_ACTIVE_XCD, DB_VECSCAN_ORIGINAL_HBM,
+           DB_VECSCAN_MIGRATED_HBM);
 
     hipStream_t stream;
     gpuErrchk(hipStreamCreate(&stream));
@@ -663,7 +669,7 @@ int main(int argc, char **argv) {
                                 db_chunks_per_hbm) == -1)
         return -1;
 
-    for (int v : {HOT_HBM, LOCAL_HBM, XCD23_HBM}) {
+    for (int v : {DB_VECSCAN_ORIGINAL_HBM, DB_VECSCAN_MIGRATED_HBM}) {
         if (db_chunks_per_hbm[v].size() < N_HOT_CHUNKS) {
             fprintf(stderr, "[DB] HBM%d has only %zu VecScan chunks; need %d\n",
                     v, db_chunks_per_hbm[v].size(), N_HOT_CHUNKS);
@@ -688,9 +694,10 @@ int main(int argc, char **argv) {
         return d_ptrs;
     };
 
-    uint64_t *d_hot_chunk_ptrs   = make_db_chunk_ptrs(db_chunks_per_hbm[HOT_HBM]);
-    uint64_t *d_local_chunk_ptrs = make_db_chunk_ptrs(db_chunks_per_hbm[LOCAL_HBM]);
-    uint64_t *d_hbm6_chunk_ptrs  = make_db_chunk_ptrs(db_chunks_per_hbm[XCD23_HBM]);
+    uint64_t *d_vecscan_original_chunk_ptrs =
+        make_db_chunk_ptrs(db_chunks_per_hbm[DB_VECSCAN_ORIGINAL_HBM]);
+    uint64_t *d_vecscan_migrated_chunk_ptrs =
+        make_db_chunk_ptrs(db_chunks_per_hbm[DB_VECSCAN_MIGRATED_HBM]);
 
     // Allocate and fill synthetic IVF-like ANN corpus, queries, and candidate lists.
     float *d_query_vecs  = nullptr;
@@ -706,7 +713,9 @@ int main(int argc, char **argv) {
                         sizeof(int) * (size_t)Q * DB_CANDIDATES_PER_QUERY));
     gpuErrchk(hipMalloc(&d_result_ids,   sizeof(int)   * Q));
 
-    build_synthetic_ann_dataset(Q, N_COLD, d_hbm6_chunk_ptrs,
+    build_synthetic_ann_dataset(Q, N_COLD,
+                                d_vecscan_original_chunk_ptrs,
+                                d_vecscan_migrated_chunk_ptrs,
                                 d_query_vecs, d_cold_entries, d_candidate_ids);
     gpuErrchk(hipStreamSynchronize(stream));
 
@@ -733,10 +742,9 @@ int main(int argc, char **argv) {
         gpuErrchk(hipFree(d_args));
     }
 
-    // 1. VecScan — XCD2 and XCD3 only, 90% hot queries scan HBM6 candidate lists
-    //    All other XCDs skip the query loop entirely (active_xcd_mask gates them out).
-    {
-        printf("\n\nVECSCAN (XCD2+XCD3 only, hot candidate lists in HBM%d)\n", XCD23_HBM);
+    auto run_vecscan = [&](const char *placement_name, int hbm, uint64_t *d_hot_chunk_ptrs) {
+        printf("\n\nVECSCAN %s (XCD%d only, hot candidate lists in HBM%d)\n",
+               placement_name, DB_VECSCAN_ACTIVE_XCD, hbm);
         uint64_t *d_blk_start = nullptr, *d_blk_end = nullptr;
         int      *d_blk_nq    = nullptr;
         gpuErrchk(hipMalloc(&d_blk_start, sizeof(uint64_t) * physical_grid_size));
@@ -747,12 +755,12 @@ int main(int argc, char **argv) {
         gpuErrchk(hipMalloc(&d_q_lat, sizeof(uint64_t) * Q));
         gpuErrchk(hipMemset(d_q_lat, 0, sizeof(uint64_t) * Q));
         gpuErrchk(hipMalloc(&d_q_bid, sizeof(uint32_t) * Q));
-        const int xcd23_mask = (1 << 2) | (1 << 3);
-        VecScanArgs h_args = {d_hbm6_chunk_ptrs, d_cold_entries, d_query_vecs,
+        const int active_xcd_mask = (1 << DB_VECSCAN_ACTIVE_XCD);
+        VecScanArgs h_args = {d_hot_chunk_ptrs, d_cold_entries, d_query_vecs,
                               d_candidate_ids, d_results, d_result_ids,
                               Q, N_COLD, DB_CANDIDATES_PER_QUERY,
                               d_blk_start, d_blk_end, d_blk_nq, d_q_lat, d_q_bid,
-                              xcd23_mask};
+                              active_xcd_mask};
         VecScanArgs *d_args = nullptr;
         gpuErrchk(hipMalloc(&d_args, sizeof(VecScanArgs)));
         gpuErrchk(hipMemcpy(d_args, &h_args, sizeof(VecScanArgs), hipMemcpyHostToDevice));
@@ -774,7 +782,10 @@ int main(int argc, char **argv) {
         float corun_ms = launch_fused_and_time(
             (void *)ppnt::fused_kernel<VecScanTargetFn, VecScanArgs>,
             physical_grid_size, kargs, stream);
-        log_tput_impact("VECSCAN XCD23@HBM6", (double)Q, "QPS", solo_ms, corun_ms, _n_plan);
+        char vecscan_tag[64];
+        snprintf(vecscan_tag, sizeof(vecscan_tag), "VECSCAN %s XCD%d@HBM%d",
+                 placement_name, DB_VECSCAN_ACTIVE_XCD, hbm);
+        log_tput_impact(vecscan_tag, (double)Q, "QPS", solo_ms, corun_ms, _n_plan);
         ppnt::parse_pingouts(d_plan, d_out, _n_plan, TARGET_BLOCKDIM_X, clock);
         parse_vecscan_qps(d_blk_start, d_blk_end, d_blk_nq,
                           physical_grid_size, physical_grid_size / XCD_NUM, clock);
@@ -782,16 +793,21 @@ int main(int argc, char **argv) {
         gpuErrchk(hipFree(d_blk_start)); gpuErrchk(hipFree(d_blk_end));
         gpuErrchk(hipFree(d_blk_nq));   gpuErrchk(hipFree(d_q_lat));
         gpuErrchk(hipFree(d_q_bid));     gpuErrchk(hipFree(d_args));
-    }
+    };
+
+    // 1. VecScan before migration.
+    run_vecscan("original", DB_VECSCAN_ORIGINAL_HBM, d_vecscan_original_chunk_ptrs);
+
+    // 2. VecScan after emulated migration: same XCD and queries, migrated HBM.
+    run_vecscan("migrated", DB_VECSCAN_MIGRATED_HBM, d_vecscan_migrated_chunk_ptrs);
 
     gpuErrchk(hipFree(d_query_vecs));
     gpuErrchk(hipFree(d_cold_entries));
     gpuErrchk(hipFree(d_results));
     gpuErrchk(hipFree(d_candidate_ids));
     gpuErrchk(hipFree(d_result_ids));
-    gpuErrchk(hipFree(d_hot_chunk_ptrs));
-    gpuErrchk(hipFree(d_local_chunk_ptrs));
-    gpuErrchk(hipFree(d_hbm6_chunk_ptrs));
+    gpuErrchk(hipFree(d_vecscan_original_chunk_ptrs));
+    gpuErrchk(hipFree(d_vecscan_migrated_chunk_ptrs));
     gpuErrchk(hipFree(db_vecscan_raw));
     gpuErrchk(hipStreamDestroy(stream));
     return 0;

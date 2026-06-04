@@ -23,14 +23,14 @@ namespace db_cg = cooperative_groups;
 // → with N_HOT_CHUNKS=4096 and Q=32768: 3686 hot queries/XCD > 2048. ✓
 #define N_HOT_CHUNKS 4096
 
-// "Bad" placement: hot table lives in HBM4, far from XCD0 and XCD1
-#define HOT_HBM 4
+// Single XCD used by the focused VecScan experiment.
+#define DB_VECSCAN_ACTIVE_XCD 2
 
-// "Good" placement: hot table lives in HBM0, local to XCD0
-#define LOCAL_HBM 0
+// HBM used for VecScan hot candidate lists before migration.
+#define DB_VECSCAN_ORIGINAL_HBM 6
 
-// HBM used by XCD2/XCD3 in the focused experiment
-#define XCD23_HBM 6
+// HBM used for VecScan hot candidate lists after emulated migration.
+#define DB_VECSCAN_MIGRATED_HBM 2
 
 // Fraction (0-100) of queries that target the hot table
 #define HOT_FRAC_PCT 90
@@ -171,7 +171,7 @@ static int home_identification(
 // first-class candidates for that centroid and returns top-1.
 // ============================================================
 struct VecScanArgs {
-    const uint64_t *__restrict__ hot_chunk_ptrs; // N_HOT_CHUNKS device addresses in HOT_HBM
+    const uint64_t *__restrict__ hot_chunk_ptrs; // N_HOT_CHUNKS device addresses in target HBM
     const float    *__restrict__ cold_entries;   // N_COLD * DB_ENTRY_DIM floats
     const float    *__restrict__ query_vecs;     // Q * DB_ENTRY_DIM floats
     const int      *__restrict__ candidate_ids;  // Q * n_candidates encoded vector ids
