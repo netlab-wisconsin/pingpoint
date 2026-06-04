@@ -32,14 +32,11 @@
 // focused subset that best illustrates the hot-entry congestion story.
 #define PPNT_PLAN_SELECTED_ONLY 0
 
-#define DISABLE_K1_PLANS 0
-#define DISABLE_K2_PLANS 0
-// Keep K2 data setup for HBM placement, but disable K2 ping generation.
-#define ENABLE_BW_PINGS 0
+#define DISABLE_K1_PLANS 1
+#define DISABLE_K2_PLANS 1
 
 // Which DB stages to co-profile with pings
 #define PPNT_PROFILE_VECSCAN_HOT   1   // VecScan, hot entry in HOT_HBM  (bad placement)
-#define PPNT_PROFILE_ATOMICAGG     1   // AtomicAgg, hot agg in HOT_HBM
 #define PPNT_PROFILE_VECSCAN_LOCAL 1   // VecScan, hot entry in LOCAL_HBM (after migration)
 
 #define TARGET_BLOCKDIM_X 1024
@@ -376,7 +373,7 @@ int main(int argc, char **argv) {
 #endif
 #endif // !DISABLE_K1_PLANS
 
-#if !(DISABLE_K2_PLANS) && (ENABLE_BW_PINGS)
+#if !(DISABLE_K2_PLANS)
     // Bandwidth plans ------------------------------------------------------
 #if !(PPNT_PLAN_SELECTED_ONLY)
     for (int x = 0; x < XCD_NUM; x++) {
@@ -426,7 +423,7 @@ int main(int argc, char **argv) {
         }
     }
 #endif
-#endif // !DISABLE_K2_PLANS && ENABLE_BW_PINGS
+#endif // !DISABLE_K2_PLANS
 
     size_t n_plan = h_plan.size();
     if (n_plan > 0) {
@@ -442,13 +439,12 @@ int main(int argc, char **argv) {
 
     // Query count (argv[1]).  Must satisfy Q*0.9/XCD_NUM > N_HOT_CHUNKS/2 for
     // the hot-table working set to exceed L2 (4MB/XCD) and produce HBM misses.
-    // With N_HOT_CHUNKS=4096: need Q > 18205.  Default is 32768.
+    // With N_HOT_CHUNKS=4096: need Q > 18205.  Default is 524288.
     const int Q      = (argc > 1) ? atoi(argv[1]) : (1 << 19); // 524288
     const int N_COLD = max(Q, 1024);
-    const int N_AGG  = N_COLD; // aggregation rounds
 
-    printf("[DB] Q=%d N_COLD=%d DB_ENTRY_DIM=%d DB_AGG_DIM=%d HOT_HBM=%d LOCAL_HBM=%d\n",
-           Q, N_COLD, DB_ENTRY_DIM, DB_AGG_DIM, HOT_HBM, LOCAL_HBM);
+    printf("[DB] Q=%d N_COLD=%d DB_ENTRY_DIM=%d HOT_HBM=%d LOCAL_HBM=%d\n",
+           Q, N_COLD, DB_ENTRY_DIM, HOT_HBM, LOCAL_HBM);
 
     hipStream_t stream;
     gpuErrchk(hipStreamCreate(&stream));
@@ -479,8 +475,8 @@ int main(int argc, char **argv) {
     //   [N_HOT_CHUNKS .. 2*N_HOT_CHUNKS-1] → AtomicAgg hot-table writes
     // ------------------------------------------------------------------
 #if !(DISABLE_K2_PLANS)
-    assert(k2_min_num_chunks_over_n_datas[HOT_HBM]   >= 2 * N_HOT_CHUNKS &&
-           "need 2*N_HOT_CHUNKS chunks in HOT_HBM");
+    assert(k2_min_num_chunks_over_n_datas[HOT_HBM]   >= N_HOT_CHUNKS &&
+           "need N_HOT_CHUNKS chunks in HOT_HBM");
     assert(k2_min_num_chunks_over_n_datas[LOCAL_HBM]  >= N_HOT_CHUNKS &&
            "need N_HOT_CHUNKS chunks in LOCAL_HBM");
     assert(k2_min_num_chunks_over_n_datas[XCD23_HBM]  >= N_HOT_CHUNKS &&
@@ -488,9 +484,6 @@ int main(int argc, char **argv) {
 
     // VecScan hot path: N_HOT_CHUNKS slabs in HOT_HBM (8MB total)
     uint64_t *d_hot_chunk_ptrs   = k2_d_chunks_per_hbm[0] + k2_h_offsets[0][HOT_HBM];
-    // AtomicAgg hot path: next N_HOT_CHUNKS slabs in HOT_HBM (non-overlapping)
-    uint64_t *d_hot_agg_ptrs     = k2_d_chunks_per_hbm[0] + k2_h_offsets[0][HOT_HBM]
-                                   + N_HOT_CHUNKS;
     // VecScan migration path: N_HOT_CHUNKS slabs in LOCAL_HBM (8MB total)
     uint64_t *d_local_chunk_ptrs = k2_d_chunks_per_hbm[0] + k2_h_offsets[0][LOCAL_HBM];
     // VecScan XCD2/XCD3 focused experiment: N_HOT_CHUNKS slabs in XCD23_HBM
@@ -499,7 +492,6 @@ int main(int argc, char **argv) {
     printf("[DB] WARNING: K2 disabled; hot table is not pinned to HOT_HBM.\n");
     // Without K2, allocate a stub pointer array on the device (no HBM guarantee).
     uint64_t *d_hot_chunk_ptrs   = nullptr;
-    uint64_t *d_hot_agg_ptrs     = nullptr;
     uint64_t *d_local_chunk_ptrs = nullptr;
     uint64_t *d_hbm6_chunk_ptrs  = nullptr;
     // (In practice, re-enable K2 to get meaningful HBM-placement results.)
@@ -509,12 +501,10 @@ int main(int argc, char **argv) {
     float *d_query_vecs  = nullptr;
     float *d_cold_entries = nullptr;
     float *d_results      = nullptr;
-    float *d_agg_inputs   = nullptr;
 
     gpuErrchk(hipMalloc(&d_query_vecs,   sizeof(float) * (size_t)Q      * DB_ENTRY_DIM));
     gpuErrchk(hipMalloc(&d_cold_entries, sizeof(float) * (size_t)N_COLD * DB_ENTRY_DIM));
     gpuErrchk(hipMalloc(&d_results,      sizeof(float) * Q));
-    gpuErrchk(hipMalloc(&d_agg_inputs,   sizeof(float) * (size_t)N_AGG  * DB_AGG_DIM));
 
     {
         float *h = new float[(size_t)Q * DB_ENTRY_DIM];
@@ -528,13 +518,6 @@ int main(int argc, char **argv) {
         gpuErrchk(hipMemcpy(d_cold_entries, h, sizeof(float) * N_COLD * DB_ENTRY_DIM, hipMemcpyHostToDevice));
         delete[] h;
     }
-    {
-        float *h = new float[(size_t)N_AGG * DB_AGG_DIM];
-        db_fill_random(h, (size_t)N_AGG * DB_AGG_DIM);
-        gpuErrchk(hipMemcpy(d_agg_inputs, h, sizeof(float) * N_AGG * DB_AGG_DIM, hipMemcpyHostToDevice));
-        delete[] h;
-    }
-
     gpuErrchk(hipStreamSynchronize(stream));
 
     // =========================================================================
@@ -608,33 +591,6 @@ int main(int argc, char **argv) {
         gpuErrchk(hipFree(d_blk_start)); gpuErrchk(hipFree(d_blk_end));
         gpuErrchk(hipFree(d_blk_nq));   gpuErrchk(hipFree(d_q_lat));
         gpuErrchk(hipFree(d_q_bid));     gpuErrchk(hipFree(d_args));
-    }
-
-    // 2. AtomicAgg — hot aggregator in HOT_HBM (bad placement)
-    //    Demonstrates: all XCDs write updates to the same row in a remote HBM,
-    //    creating a write-congestion hotspot on the XCD→HBM4 path.
-    {
-        printf("\n\nATOMICOAGG (hot_agg in HBM%d — BAD placement)\n", HOT_HBM);
-        AtomicAggArgs h_args = {d_agg_inputs, d_hot_agg_ptrs, N_AGG};
-        AtomicAggArgs *d_args = nullptr;
-        gpuErrchk(hipMalloc(&d_args, sizeof(AtomicAggArgs)));
-        gpuErrchk(hipMemcpy(d_args, &h_args, sizeof(AtomicAggArgs), hipMemcpyHostToDevice));
-        AtomicAggTargetFn fn{};
-        size_t _n_plan = PPNT_PROFILE_ATOMICAGG ? n_plan : 0;
-        void *kargs[] = {(void *)&fn, (void *)&d_args, (void *)&d_plan,
-                         (void *)&_n_plan, (void *)&d_out};
-        size_t n_plan_solo = 0;
-        void *kargs_solo[] = {(void *)&fn, (void *)&d_args, (void *)&d_plan,
-                              (void *)&n_plan_solo, (void *)&d_out};
-        float solo_ms = launch_fused_and_time(
-            (void *)ppnt::fused_kernel<AtomicAggTargetFn, AtomicAggArgs>,
-            physical_grid_size, kargs_solo, stream);
-        float corun_ms = launch_fused_and_time(
-            (void *)ppnt::fused_kernel<AtomicAggTargetFn, AtomicAggArgs>,
-            physical_grid_size, kargs, stream);
-        log_tput_impact("ATOMICAGG hot@HBM4", (double)N_AGG, "updates/s", solo_ms, corun_ms, _n_plan);
-        ppnt::parse_pingouts(d_plan, d_out, _n_plan, TARGET_BLOCKDIM_X, clock);
-        gpuErrchk(hipFree(d_args));
     }
 
     gpuErrchk(hipStreamDestroy(stream));

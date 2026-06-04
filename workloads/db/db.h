@@ -18,9 +18,6 @@ using namespace std;
 // → with N_HOT_CHUNKS=4096 and Q=32768: 3686 hot queries/XCD > 2048. ✓
 #define N_HOT_CHUNKS 4096
 
-// Dimension of the hot aggregator row
-#define DB_AGG_DIM 64
-
 // "Bad" placement: hot table lives in HBM4, far from XCD0 and XCD1
 #define HOT_HBM 4
 
@@ -140,46 +137,3 @@ struct VecScanTargetFn {
     }
 };
 
-// ============================================================
-// Kernel 2: AtomicAgg — hot-key aggregation update
-//
-// Scenario: a GPU analytics engine runs GROUP BY / COUNT(*) over
-// a skewed dataset.  The "hot group" accumulator is spread across
-// N_HOT_CHUNKS 2KB slabs in HOT_HBM (8MB total).  Each aggregation
-// round n writes to a different slab (n % N_HOT_CHUNKS), so the
-// write working set also exceeds L2 and forces HBM4 traffic.
-// ============================================================
-struct AtomicAggArgs {
-    const float    *__restrict__ input_vals;    // N * DB_AGG_DIM floats (per-round local data)
-    const uint64_t *__restrict__ hot_agg_ptrs;  // N_HOT_CHUNKS device addresses in HOT_HBM
-    int N; // number of aggregation rounds
-};
-
-struct AtomicAggTargetFn {
-    __device__ __forceinline__
-    void operator()(const AtomicAggArgs *__restrict__ a,
-                    int bid, int tid, int gridDimX, int blockDimX,
-                    int n_ppnt_tbs_in_xcd) const
-    {
-        int n_tbs_in_xcd    = gridDimX / XCD_NUM;
-        int logical_bid     = ppnt::physical_to_logical_bid(bid, n_tbs_in_xcd, n_ppnt_tbs_in_xcd);
-        int logical_grid_sz = (n_tbs_in_xcd - n_ppnt_tbs_in_xcd) * XCD_NUM;
-
-        __shared__ float local_agg[DB_AGG_DIM];
-
-        for (int n = logical_bid; n < a->N; n += logical_grid_sz) {
-            // Each round targets a different slab in the 8MB hot table.
-            float *hot_agg = reinterpret_cast<float *>(
-                a->hot_agg_ptrs[n % N_HOT_CHUNKS]);
-
-            // Load one input row into shared memory
-            for (int d = tid; d < DB_AGG_DIM; d += blockDimX)
-                local_agg[d] = a->input_vals[(size_t)n * DB_AGG_DIM + d];
-            __syncthreads();
-
-            // Atomic accumulate into the slab in HOT_HBM
-            for (int d = tid; d < DB_AGG_DIM; d += blockDimX)
-                atomicAdd(&hot_agg[d], local_agg[d]);
-        }
-    }
-};
