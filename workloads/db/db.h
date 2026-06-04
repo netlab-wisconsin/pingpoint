@@ -24,13 +24,56 @@ namespace db_cg = cooperative_groups;
 #define N_HOT_CHUNKS 4096
 
 // Single XCD used by the focused VecScan experiment.
+#ifndef DB_VECSCAN_ACTIVE_XCD
 #define DB_VECSCAN_ACTIVE_XCD 2
+#endif
 
 // HBM used for VecScan hot candidate lists before migration.
-#define DB_VECSCAN_ORIGINAL_HBM 6
+#ifndef DB_VECSCAN_ORIGINAL_HBM
+#define DB_VECSCAN_ORIGINAL_HBM 4
+#endif
 
 // HBM used for VecScan hot candidate lists after emulated migration.
+#ifndef DB_VECSCAN_MIGRATED_HBM
 #define DB_VECSCAN_MIGRATED_HBM 2
+#endif
+
+// Best-effort VecScan engines used by db_be.cpp.
+#ifndef DB_BE_ACTIVE_XCD
+#define DB_BE_ACTIVE_XCD 3
+#endif
+
+#ifndef DB_BE_HBM0
+#define DB_BE_HBM0 4
+#endif
+
+#ifndef DB_BE_HBM1
+#define DB_BE_HBM1 5
+#endif
+
+#if DB_VECSCAN_ACTIVE_XCD < 0 || DB_VECSCAN_ACTIVE_XCD >= XCD_NUM
+#error "DB_VECSCAN_ACTIVE_XCD must be in [0, XCD_NUM)"
+#endif
+
+#if DB_VECSCAN_ORIGINAL_HBM < 0 || DB_VECSCAN_ORIGINAL_HBM >= HBM_NUM
+#error "DB_VECSCAN_ORIGINAL_HBM must be in [0, HBM_NUM)"
+#endif
+
+#if DB_VECSCAN_MIGRATED_HBM < 0 || DB_VECSCAN_MIGRATED_HBM >= HBM_NUM
+#error "DB_VECSCAN_MIGRATED_HBM must be in [0, HBM_NUM)"
+#endif
+
+#if DB_BE_ACTIVE_XCD < 0 || DB_BE_ACTIVE_XCD >= XCD_NUM
+#error "DB_BE_ACTIVE_XCD must be in [0, XCD_NUM)"
+#endif
+
+#if DB_BE_HBM0 < 0 || DB_BE_HBM0 >= HBM_NUM
+#error "DB_BE_HBM0 must be in [0, HBM_NUM)"
+#endif
+
+#if DB_BE_HBM1 < 0 || DB_BE_HBM1 >= HBM_NUM
+#error "DB_BE_HBM1 must be in [0, HBM_NUM)"
+#endif
 
 // Fraction (0-100) of queries that target the hot table
 #define HOT_FRAC_PCT 90

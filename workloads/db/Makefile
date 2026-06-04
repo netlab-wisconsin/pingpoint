@@ -12,13 +12,14 @@ INCLUDES := -I$(HIP_HOME)/include/rocprofiler/ \
 LDFLAGS  := -L$(HIP_HOME)/lib/rocprofiler -lrocprofiler64 -lhsa-runtime64 -lrocm_smi64 -ldl
 
 DB_ALL_TARGET := $(BIN_DIR)/db_all
+DB_BE_TARGET  := $(BIN_DIR)/db_be
 
 DB_LIST_SIZE := 64
-DB_CANDIDATES_PER_QUERY := 64
+DB_CANDIDATES_PER_QUERY := 1
 
 .PHONY: all clean
 
-all: $(DB_ALL_TARGET)
+all: $(DB_ALL_TARGET) $(DB_BE_TARGET)
 
 $(BIN_DIR):
 	mkdir -p $@
@@ -30,5 +31,12 @@ $(DB_ALL_TARGET): db.cpp db.h \
 	-DDB_CANDIDATES_PER_QUERY=$(DB_CANDIDATES_PER_QUERY) \
 	-o $@ $<
 
+$(DB_BE_TARGET): db_be.cpp db.h \
+                 ppnt.h main.h k1.h k2.h | $(BIN_DIR)
+	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) \
+	-DDB_LIST_SIZE=$(DB_LIST_SIZE) \
+	-DDB_CANDIDATES_PER_QUERY=$(DB_CANDIDATES_PER_QUERY) \
+	-o $@ $<
+
 clean:
-	rm -f $(DB_ALL_TARGET)
+	rm -f $(DB_ALL_TARGET) $(DB_BE_TARGET)
