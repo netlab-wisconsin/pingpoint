@@ -330,9 +330,10 @@ static void build_synthetic_ann_dataset(
                         sizeof(int) * (size_t)Q * DB_CANDIDATES_PER_QUERY,
                         hipMemcpyHostToDevice));
 
-    printf("[DB ANN] centroids: hot=%d cold=%d list_size=%d candidates/query=%d nprobe=%d hot_queries=%d/%d\n",
-           hot_centroids, cold_centroids, DB_LIST_SIZE, DB_CANDIDATES_PER_QUERY,
-           DB_NPROBE, hot_queries, Q);
+    printf("[DB ANN] hot_vectors=%d cold_vectors=%d centroids: hot=%d cold=%d "
+           "list_size=%d candidates/query=%d nprobe=%d hot_queries=%d/%d\n",
+           N_HOT_CHUNKS, N_COLD, hot_centroids, cold_centroids,
+           DB_LIST_SIZE, DB_CANDIDATES_PER_QUERY, DB_NPROBE, hot_queries, Q);
 }
 
 int main(int argc, char **argv) {
@@ -620,14 +621,15 @@ int main(int argc, char **argv) {
     // DB SETUP
     // =========================================================================
 
-    // Query count (argv[1]).  Must satisfy Q*0.9/XCD_NUM > N_HOT_CHUNKS/2 for
-    // the hot-table working set to exceed L2 (4MB/XCD) and produce HBM misses.
-    // With N_HOT_CHUNKS=4096: need Q > 18205.  Default is 524288.
-    const int Q      = (argc > 1) ? atoi(argv[1]) : (1 << 19); // 524288
-    const int N_COLD = max(Q, 1024);
+    // Query count (argv[1]).  The corpus is split explicitly into hot vectors
+    // stored in HBM-classified 2KB chunks and a separate cold vector table.
+    const int Q       = (argc > 1) ? atoi(argv[1]) : (1 << 19); // 524288
+    const int N_HOT   = N_HOT_CHUNKS;
+    const int N_COLD  = max(Q, 1024);
+    const int N_TOTAL = N_HOT + N_COLD;
 
-    printf("[DB] Q=%d N_COLD=%d DB_ENTRY_DIM=%d HOT_HBM=%d LOCAL_HBM=%d\n",
-           Q, N_COLD, DB_ENTRY_DIM, HOT_HBM, LOCAL_HBM);
+    printf("[DB] Q=%d N_TOTAL=%d N_HOT=%d N_COLD=%d DB_ENTRY_DIM=%d HOT_HBM=%d LOCAL_HBM=%d\n",
+           Q, N_TOTAL, N_HOT, N_COLD, DB_ENTRY_DIM, HOT_HBM, LOCAL_HBM);
 
     hipStream_t stream;
     gpuErrchk(hipStreamCreate(&stream));
