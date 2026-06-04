@@ -170,6 +170,79 @@ static void fill_noisy_centroid_vec(
     normalize_vec(dst);
 }
 
+static uint32_t db_hash_u32(uint32_t x)
+{
+    x ^= x >> 16;
+    x *= 0x7feb352dU;
+    x ^= x >> 15;
+    x *= 0x846ca68bU;
+    x ^= x >> 16;
+    return x;
+}
+
+static int db_gcd(int a, int b)
+{
+    while (b != 0) {
+        int t = a % b;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
+static int db_sample_list_offset(int q, int centroid_id, int ci, int list_size)
+{
+    if (list_size <= 1) return 0;
+
+    uint32_t seed = db_hash_u32((uint32_t)q ^ ((uint32_t)centroid_id * 0x9e3779b9U));
+    int start = (int)(seed % (uint32_t)list_size);
+    int stride = (int)(db_hash_u32(seed ^ 0x85ebca6bU) % (uint32_t)list_size);
+    if (stride == 0) stride = 1;
+    while (db_gcd(stride, list_size) != 1) {
+        stride++;
+        if (stride == list_size) stride = 1;
+    }
+    return (start + ci * stride) % list_size;
+}
+
+static int db_probe_centroid(int routed_centroid, int probe, int n_centroids)
+{
+    if (n_centroids <= 1) return 0;
+    if (probe == 0) return routed_centroid;
+
+    int radius = (probe + 1) / 2;
+    int delta = (probe & 1) ? radius : -radius;
+    int c = (routed_centroid + delta) % n_centroids;
+    return c < 0 ? c + n_centroids : c;
+}
+
+static int db_make_candidate_id(
+    int q, int routed_global_centroid, int routed_local_centroid,
+    int n_local_centroids, int n_entries, int ci, int encoded_base)
+{
+    int list_base = routed_local_centroid * DB_LIST_SIZE;
+    int list_size = min(DB_LIST_SIZE, n_entries - list_base);
+
+    if (list_size >= DB_CANDIDATES_PER_QUERY) {
+        int offset = db_sample_list_offset(q, routed_global_centroid, ci, list_size);
+        return encoded_base + list_base + offset;
+    }
+
+    int nprobe = min(DB_NPROBE, n_local_centroids);
+    int per_probe = (DB_CANDIDATES_PER_QUERY + nprobe - 1) / nprobe;
+    int probe = min(ci / per_probe, nprobe - 1);
+    int within_probe = ci % per_probe;
+    int probed_local_centroid = db_probe_centroid(routed_local_centroid, probe,
+                                                  n_local_centroids);
+    int probed_global_centroid = routed_global_centroid
+        + (probed_local_centroid - routed_local_centroid);
+    list_base = probed_local_centroid * DB_LIST_SIZE;
+    list_size = min(DB_LIST_SIZE, n_entries - list_base);
+    int offset = db_sample_list_offset(q, probed_global_centroid, within_probe,
+                                       list_size);
+    return encoded_base + ((list_base + offset) % n_entries);
+}
+
 static void build_synthetic_ann_dataset(
     int Q, int N_COLD, const uint64_t *d_hot_chunk_ptrs,
     float *d_query_vecs, float *d_cold_entries, int *d_candidate_ids)
@@ -229,25 +302,22 @@ static void build_synthetic_ann_dataset(
     int hot_queries = 0;
     for (int q = 0; q < Q; q++) {
         bool is_hot = pct_dist(rng) < HOT_FRAC_PCT;
-        int list_base;
         int centroid_id;
         if (is_hot) {
             hot_queries++;
             int hot_c = hot_centroid_dist(rng);
             centroid_id = hot_c;
-            list_base = hot_c * DB_LIST_SIZE;
             for (int ci = 0; ci < DB_CANDIDATES_PER_QUERY; ci++)
                 h_candidate_ids[(size_t)q * DB_CANDIDATES_PER_QUERY + ci] =
-                    list_base + (ci % DB_LIST_SIZE);
+                    db_make_candidate_id(q, centroid_id, hot_c, hot_centroids,
+                                         N_HOT_CHUNKS, ci, 0);
         } else {
             int cold_c = cold_centroid_dist(rng);
             centroid_id = hot_centroids + cold_c;
-            list_base = cold_c * DB_LIST_SIZE;
-            for (int ci = 0; ci < DB_CANDIDATES_PER_QUERY; ci++) {
-                int cold_id = (list_base + ci) % N_COLD;
+            for (int ci = 0; ci < DB_CANDIDATES_PER_QUERY; ci++)
                 h_candidate_ids[(size_t)q * DB_CANDIDATES_PER_QUERY + ci] =
-                    N_HOT_CHUNKS + cold_id;
-            }
+                    db_make_candidate_id(q, centroid_id, cold_c, cold_centroids,
+                                         N_COLD, ci, N_HOT_CHUNKS);
         }
         fill_noisy_centroid_vec(h_query_vecs.data() + (size_t)q * DB_ENTRY_DIM,
                                 centroids, centroid_id, rng, query_noise);
@@ -260,9 +330,9 @@ static void build_synthetic_ann_dataset(
                         sizeof(int) * (size_t)Q * DB_CANDIDATES_PER_QUERY,
                         hipMemcpyHostToDevice));
 
-    printf("[DB ANN] centroids: hot=%d cold=%d list_size=%d candidates/query=%d hot_queries=%d/%d\n",
+    printf("[DB ANN] centroids: hot=%d cold=%d list_size=%d candidates/query=%d nprobe=%d hot_queries=%d/%d\n",
            hot_centroids, cold_centroids, DB_LIST_SIZE, DB_CANDIDATES_PER_QUERY,
-           hot_queries, Q);
+           DB_NPROBE, hot_queries, Q);
 }
 
 int main(int argc, char **argv) {
