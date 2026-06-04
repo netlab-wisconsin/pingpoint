@@ -1,7 +1,7 @@
 BASE_DIR := $(shell pwd)
 BIN_DIR := $(BASE_DIR)/bin
 
-HIPOPTS = --amdgpu-target=gfx950
+HIPOPTS = --offload-arch=gfx950
 HIP_PATH = /opt/rocm-7.1.0
 CC := $(HIP_PATH)/bin/hipcc
 

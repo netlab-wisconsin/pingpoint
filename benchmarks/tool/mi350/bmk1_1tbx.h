@@ -11,6 +11,15 @@ namespace cg = cooperative_groups;
 #define XCDS_NUM 8 // num xcds in mi300x
 #endif
 
+constexpr int PAGE_SIZE = (2 * 1024 * 1024); // 2MB huge page
+constexpr int CHUNK_SIZE = (2 * 1024); // 2KB
+// constexpr int CHUNK_SIZE = (4 * 1024); // 4KB chunk size
+constexpr int N_PAGES = (128); // you can change
+
+constexpr int THREADS_PER_WARP = (64);
+constexpr int WARPS_PER_BLOCK = (CHUNK_SIZE / (16 * THREADS_PER_WARP)); // one block per chunk
+constexpr int TPX = (1); // thread blocks per xcd
+
 #ifndef DEBUG
 #define DEBUG 0
 #endif
@@ -61,8 +70,13 @@ __global__ void identify_home(void *data, size_t size, uint32_t *d_cycles, int n
     assert(n_tbs_in_xcd * XCDS_NUM == gridDim.x); assert(n_tbs_in_xcd == 1);
 
     // for this bmk, assert 256 threads per block if chunk size is 4KB (128 for 2KB)
-    assert(blockDim.x == 128);
-    // assert(blockDim.x == 256);
+    if (CHUNK_SIZE == (2 * 1024)) {
+        assert(blockDim.x == 128);
+    } else if (CHUNK_SIZE == (4 * 1024)) {
+        assert(blockDim.x == 256);
+    } else {
+        assert(false && "unsupported chunk size");
+    }
 
     // for this bmk, both global_barrier and cooperative_groups are supported
     #if not USE_GLOBAL_BARRIER
@@ -137,8 +151,10 @@ __global__ void identify_home(void *data, size_t size, uint32_t *d_cycles, int n
             uint32_t end = __builtin_readcyclecounter();
             uint32_t cycle = end - start;
             if (tid == 0) {
-                const int d_cycles_index = xcc_id * n_chunks + (i * n_inner + j) * n_tbs_in_xcd + tbid_in_xcd;
-                d_cycles[d_cycles_index] = cycle;
+                if (xcc_id < XCDS_NUM) {
+                    const int d_cycles_index = xcc_id * n_chunks + (i * n_inner + j) * n_tbs_in_xcd + tbid_in_xcd;
+                    d_cycles[d_cycles_index] = cycle;
+                }
                 #if DEBUG
                 printf("outer %zu inner %zu tbid_in_xcd %d (bid %d, xcd %d): %u cycles\n", i, j, tbid_in_xcd, bid, xcc_id, cycle);
                 #endif

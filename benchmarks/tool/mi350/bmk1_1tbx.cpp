@@ -8,6 +8,7 @@
 #include <hip/hip_runtime.h>
 
 #include "bmk1_1tbx.h"
+#include "bmk3.h"
 
 using namespace std;
 
@@ -19,23 +20,6 @@ inline void gpuAssert(hipError_t code, const char *file, int line, bool abort=tr
         if (abort) exit(code);
     }
 }
-
-#ifndef XCDS_NUM
-#define XCDS_NUM 8 // num xcds in mi300x
-#endif
-
-constexpr int PAGE_SIZE = (2 * 1024 * 1024); // 2MB huge page
-constexpr int CHUNK_SIZE = (2 * 1024); // 2KB
-// constexpr int CHUNK_SIZE = (4 * 1024); // 4KB chunk size
-constexpr int N_PAGES = (128); // you can change
-
-constexpr int THREADS_PER_WARP = (64);
-constexpr int WARPS_PER_BLOCK = (CHUNK_SIZE / (16 * THREADS_PER_WARP)); // one block per chunk
-constexpr int TPX = (1); // thread blocks per xcd
-
-#ifndef DEBUG
-#define DEBUG 1
-#endif
 
 int main() {
 
@@ -52,30 +36,29 @@ int main() {
 
     /* allocate data */
 
-    char *d_data;
-    gpuErrchk(hipMalloc((void**)&d_data, data_size + 0x1000));
-    d_data = (char*)(((uintptr_t)d_data & ~(0x0FFF)) + 0x1000); // page align
+    char *d_data_alloc;
+    gpuErrchk(hipMalloc((void**)&d_data_alloc, data_size + PAGE_SIZE));
+    char *d_data = (char*)(((uintptr_t)d_data_alloc + PAGE_SIZE - 1) & ~(uintptr_t)(PAGE_SIZE - 1)); // 2MB page align
 
     /* allocate cycles array */
 
     uint32_t *d_cycles; // per-xcd, per-chunk cycles array
     gpuErrchk(hipMalloc((void**)&d_cycles, sizeof(uint32_t) * XCDS_NUM * n_chunks ));
+    gpuErrchk(hipMemset(d_cycles, 0xff, sizeof(uint32_t) * XCDS_NUM * n_chunks));
     printf("allocated d_cycles array[%d][%d]\n", XCDS_NUM, n_chunks);
 
     /* create cu masked stream */
 
-    hipDeviceProp_t props;
-    gpuErrchk(hipGetDeviceProperties(&props, 0));
-    
     hipStream_t stream;
-    uint32_t cuMaskSize = (props.multiProcessorCount + 31) / 32;
-    std::vector<uint32_t> cuMask(cuMaskSize, 0); // Initialize all CUs as disabled. Use (uint32_t)-1 to enable all.
-
-    const size_t n_cus_enabled_per_xcd = n_blocks / 8;
-    for (int i = 0; i < n_cus_enabled_per_xcd; ++i) { 
-        cuMask[i/4] |= (0xffu << ((3-(i%4)) * 8));
+    uint32_t cuMaskSize;
+    std::vector<uint32_t> cuMask;
+    const int n_cus_enabled_per_xcd = mask_cu(TPX, cuMaskSize, cuMask);
+    if (n_cus_enabled_per_xcd < 0) {
+        gpuErrchk(hipFree(d_data_alloc));
+        gpuErrchk(hipFree(d_cycles));
+        return 1;
     }
-    printf("first %zu cus enabled per xcd\n", n_cus_enabled_per_xcd);
+    printf("first %d cus enabled per xcd\n", n_cus_enabled_per_xcd);
     #if DEBUG
     {
         printf("CU Mask: ");
@@ -114,28 +97,53 @@ int main() {
     ));
     
     vector<int> h_home(n_chunks);
+    size_t missing_cycles = 0;
+    size_t chunks_without_valid_xcd = 0;
+    int exit_code = 0;
     for (size_t i = 0; i < n_chunks; i++) {
         uint32_t min_cycles = UINT32_MAX;
         int min_xcc = -1;
         for (int xcc = 0; xcc < XCDS_NUM; xcc++) {
             // uint32_t c = h_cycles[xcc][i];
             uint32_t c = h_cycles[xcc * n_chunks + i];
+            if (c == UINT32_MAX) {
+                missing_cycles++;
+                #if DEBUG
+                printf("chunk[%zu] xcd %d: missing\n", i, xcc);
+                #endif
+                continue;
+            }
             if (c < min_cycles) {
                 min_cycles = c;
                 min_xcc = xcc;
             }
             #if DEBUG
-            printf("chunk[%zu] xcd %d: cycles %u\n", i, xcc, c);
+                printf("chunk[%zu] xcd %d: cycles %u\n", i, xcc, c);
             #endif
+        }
+        if (min_xcc < 0) {
+            chunks_without_valid_xcd++;
+            continue;
         }
         h_home[i] = min_xcc;
         printf("chunk[%zu]: home xcd %d\n", i, h_home[i]);
     }
+    if (missing_cycles != 0) {
+        fprintf(stderr,
+                "warning: %zu/%zu d_cycles slots were not written; scheduler/XCD coverage assumption may be wrong\n",
+                missing_cycles,
+                (size_t)XCDS_NUM * n_chunks);
+    }
+    if (chunks_without_valid_xcd != 0) {
+        fprintf(stderr, "error: %zu chunks had no valid XCD measurements\n", chunks_without_valid_xcd);
+        exit_code = 1;
+    }
 
     /* cleanup */
 
-    gpuErrchk(hipFree(d_data));
+    free(h_cycles);
+    gpuErrchk(hipFree(d_data_alloc));
     gpuErrchk(hipFree(d_cycles));
 
-    return 0;
+    return exit_code;
 }
