@@ -1,5 +1,5 @@
 BASE_DIR := $(shell pwd)
-BIN_DIR  := $(BASE_DIR)/../bin
+BIN_DIR  := $(BASE_DIR)/bin
 
 HIP_HOME 	:= /opt/rocm-7.1.0
 OPTS 		:= --amdgpu-target=gfx950

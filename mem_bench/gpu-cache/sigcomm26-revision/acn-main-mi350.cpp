@@ -118,7 +118,9 @@ void measure()
     hipEvent_t start, stop;
     GPU_ERROR(hipEventCreate(&start));
     GPU_ERROR(hipEventCreate(&stop));
-
+    
+    // June note (06/05/26) Setting i to large for large N incurs long time
+    // During SIGCOMM'26 revision, only used i < 3 for LLC and HBM range in mi350x measurement.
     for (int i = 0; i < 15; i++)
     {
         const size_t bufferCount = 2 * N + i * 1282;
@@ -160,24 +162,33 @@ void measure()
 
             for (size_t k = 0; k < n_dtype_dbuf; k++)
             {
-                uint32_t min_cycles = UINT32_MAX;
-                int min_xcc = -1;
+                uint64_t group_cycles[CC_NUM] = {};
+                uint32_t group_counts[CC_NUM] = {};
                 for (int x = 0; x < XCD_NUM; x++)
                 {
                     uint32_t c = h_cycles[x][k];
-                    if (c < min_cycles)
-                    {
-                        min_cycles = c;
-                        min_xcc = x;
-                    }
+                    uint32_t cc = get_cc((uint32_t)x);
+                    group_cycles[cc] += c;
+                    group_counts[cc]++;
 #if DEBUG_LEVEL >= 3
                     cout << "dtype " << k << " xcc " << x << " cycles " << c << "\n";
 #endif
                 }
 
-                uint32_t cc = get_cc((uint32_t)min_xcc);
-                dtype_home_cc[k] = cc;
-                cc_dtypes[cc].push_back(reinterpret_cast<dtype *>((size_t)dbuf + k * sizeof(dtype)));
+                uint32_t home_cc = 0;
+                uint64_t min_group_cycles = UINT64_MAX;
+                for (uint32_t cc = 0; cc < CC_NUM; cc++)
+                {
+                    uint64_t avg_cycles = group_cycles[cc] / group_counts[cc];
+                    if (avg_cycles < min_group_cycles)
+                    {
+                        min_group_cycles = avg_cycles;
+                        home_cc = cc;
+                    }
+                }
+
+                dtype_home_cc[k] = home_cc;
+                cc_dtypes[home_cc].push_back(reinterpret_cast<dtype *>((size_t)dbuf + k * sizeof(dtype)));
             }
 
             GPU_ERROR(hipFree(d_cycles));
@@ -372,38 +383,56 @@ int main(int argc, char **argv)
     // measure<30 * 512, 512>();
     // measure<31 * 512, 512>();
     // measure<32 * 512, 512>();
-    // measure<128 * 256, 256>(); // 1024KB (1MB)
 
-    // LLC range
+    // LLC/HBM range
+    // measure<expSeries(1), 512>();
+    // measure<expSeries(2), 512>();
+    // measure<expSeries(3), 512>();
     // measure<expSeries(4), 512>();
+    // measure<expSeries(5), 512>();
+    // measure<expSeries(6), 512>();
+    // measure<expSeries(7), 512>();
     // measure<expSeries(8), 512>();
+    // measure<expSeries(9), 512>();
+    // measure<expSeries(10), 512>();
+    // measure<expSeries(11), 512>();
     // measure<expSeries(12), 512>();
+    // measure<expSeries(13), 512>();
+    // measure<expSeries(14), 512>();
     // measure<expSeries(16), 512>();
+    // measure<expSeries(17), 512>();
+    // measure<expSeries(18), 512>();
+    // measure<expSeries(19), 512>();
     // measure<expSeries(20), 512>();
+    // measure<expSeries(21), 512>();
+    // measure<expSeries(22), 512>();
+    // measure<expSeries(23), 512>();
     // measure<expSeries(24), 512>();
+    // measure<expSeries(25), 512>();
+    // measure<expSeries(26), 512>();
+    // measure<expSeries(27), 512>();
     // measure<expSeries(28), 512>();
+    // measure<expSeries(29), 512>();
+    // measure<expSeries(30), 512>();
+    // measure<expSeries(31), 512>();
     // measure<expSeries(32), 512>();
+    // measure<expSeries(33), 512>();
+    // measure<expSeries(34), 512>();
+    // measure<expSeries(35), 512>();
     // measure<expSeries(36), 512>();
+    // measure<expSeries(37), 512>();
+    // measure<expSeries(38), 512>();
+    // measure<expSeries(39), 512>();
     // measure<expSeries(40), 512>();
+    // measure<expSeries(41), 512>();
+    // measure<expSeries(42), 512>();
+    // measure<expSeries(43), 512>();
     // measure<expSeries(44), 512>();
-
-    // HBM range
     // measure<expSeries(45), 512>();
     // measure<expSeries(46), 512>();
     // measure<expSeries(47), 512>();
     // measure<expSeries(48), 512>();
     // measure<expSeries(49), 512>();
-    // measure<expSeries(50), 512>();
-    // measure<expSeries(51), 512>();
-    // measure<expSeries(52), 512>();
-    // measure<expSeries(53), 512>();
-    // measure<expSeries(54), 512>();
-    // measure<expSeries(55), 512>();
-    // measure<expSeries(56), 512>();
-    // measure<expSeries(57), 512>();
-    // measure<expSeries(58), 512>();
-    // measure<expSeries(59), 512>();
-    // measure<expSeries(60), 512>();
 
 #else
     measure<128, 128>();
