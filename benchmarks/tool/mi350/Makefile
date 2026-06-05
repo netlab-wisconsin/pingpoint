@@ -7,10 +7,12 @@ CC := $(HIP_PATH)/bin/hipcc
 
 BENCHMARKS := bmk1 bmk1_shuffle bmk1_ntbx bmk1_1tbx bmk2 bmk3
 
+DEBUG ?= 0
+LOG_CYCLE ?= 1
 all: $(BENCHMARKS)
 
 %: %.cpp
-	$(CC) $(HIPOPTS) -o $(BIN_DIR)/$@ $<
+	$(CC) $(HIPOPTS) -DDEBUG=${DEBUG} -DLOG_CYCLE=${LOG_CYCLE} -o $(BIN_DIR)/$@ $<
 
 clean:
 	rm -f $(foreach bmk,$(BENCHMARKS),$(BIN_DIR)/$(bmk))

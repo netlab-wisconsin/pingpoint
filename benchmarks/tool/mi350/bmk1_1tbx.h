@@ -12,8 +12,9 @@ namespace cg = cooperative_groups;
 #endif
 
 constexpr int PAGE_SIZE = (2 * 1024 * 1024); // 2MB huge page
-constexpr int CHUNK_SIZE = (2 * 1024); // 2KB
+// constexpr int CHUNK_SIZE = (2 * 1024); // 2KB chunk size
 // constexpr int CHUNK_SIZE = (4 * 1024); // 4KB chunk size
+constexpr int CHUNK_SIZE = (8 * 1024); // 8KB chunk size
 constexpr int N_PAGES = (128); // you can change
 
 constexpr int THREADS_PER_WARP = (64);
@@ -22,6 +23,10 @@ constexpr int TPX = (1); // thread blocks per xcd
 
 #ifndef DEBUG
 #define DEBUG 0
+#endif
+
+#ifndef LOG_CYCLE
+#define LOG_CYCLE 0
 #endif
 
 #ifndef USE_GLOBAL_BARRIER
@@ -69,14 +74,7 @@ __global__ void identify_home(void *data, size_t size, uint32_t *d_cycles, int n
     // for this bmk, assert 1 tb per xcd
     assert(n_tbs_in_xcd * XCDS_NUM == gridDim.x); assert(n_tbs_in_xcd == 1);
 
-    // for this bmk, assert 256 threads per block if chunk size is 4KB (128 for 2KB)
-    if (CHUNK_SIZE == (2 * 1024)) {
-        assert(blockDim.x == 128);
-    } else if (CHUNK_SIZE == (4 * 1024)) {
-        assert(blockDim.x == 256);
-    } else {
-        assert(false && "unsupported chunk size");
-    }
+    assert(blockDim.x == CHUNK_SIZE / sizeof(uint4));
 
     // for this bmk, both global_barrier and cooperative_groups are supported
     #if not USE_GLOBAL_BARRIER
@@ -155,7 +153,7 @@ __global__ void identify_home(void *data, size_t size, uint32_t *d_cycles, int n
                     const int d_cycles_index = xcc_id * n_chunks + (i * n_inner + j) * n_tbs_in_xcd + tbid_in_xcd;
                     d_cycles[d_cycles_index] = cycle;
                 }
-                #if DEBUG
+                #if LOG_CYCLE
                 printf("outer %zu inner %zu tbid_in_xcd %d (bid %d, xcd %d): %u cycles\n", i, j, tbid_in_xcd, bid, xcc_id, cycle);
                 #endif
             }
