@@ -180,27 +180,36 @@ int home_identification(
     }
 
     for (size_t k = 0; k < n_dtype_dbuf; k++) {
-        uint32_t min_cycles = UINT32_MAX;
-        int min_xcc = -1;
+        uint64_t group_cycles[CC_NUM] = {};
+        uint32_t group_counts[CC_NUM] = {};
         for (int x = 0; x < XCD_NUM; x++) {
             uint32_t c = h_cycles[x][k];
-            if (c < min_cycles) {
-                min_cycles = c;
-                min_xcc = x;
-            }
+            uint32_t cc = get_cc((uint32_t)x);
+            group_cycles[cc] += c;
+            group_counts[cc]++;
             #if DEBUG_K1_HOME
             cout << "dtype " << k << " xcc " << x << " cycles " << c << "\n";
             #endif
         }
 
-        dtype_home_xcd[k] = min_xcc;
-        xcd_dtypes[min_xcc].push_back((uint32_t)k);
+        uint32_t home_cc = 0;
+        uint64_t min_group_cycles = UINT64_MAX;
+        for (uint32_t cc = 0; cc < CC_NUM; cc++) {
+            uint64_t avg_cycles = group_cycles[cc] / group_counts[cc];
+            if (avg_cycles < min_group_cycles) {
+                min_group_cycles = avg_cycles;
+                home_cc = cc;
+            }
+        }
+
+        dtype_home_xcd[k] = home_cc;
+        xcd_dtypes[home_cc].push_back((uint32_t)k);
 
         if (k % (skip_factor * cl_size) == 0) {
             size_t cl_idx = k / (skip_factor * cl_size);
             if (cl_idx < n_cl_dbuf) {
-                cl_home_xcd[cl_idx] = min_xcc;
-                xcd_cls[min_xcc].push_back((uint32_t)cl_idx);
+                cl_home_xcd[cl_idx] = home_cc;
+                xcd_cls[home_cc].push_back((uint32_t)cl_idx);
             }
         }
     }
@@ -217,7 +226,7 @@ int home_identification(
 
     // boundary check
     // single-CC LLC range is 1MB - 16MB
-    for (int x = 0; x < XCD_NUM; x++) {
+    for (int x = 0; x < CC_NUM; x++) {
 #if 0
         if (xcd_cls[x].size() * cl_bytes < (64 * 1024 * 1024)) {
             cout << "K1 pinned HBM" << "[" << x << "]" << " chunks size " << xcd_cls[x].size() * cl_bytes / (1024 * 1024) << " MB" //

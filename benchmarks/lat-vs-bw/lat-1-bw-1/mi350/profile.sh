@@ -14,14 +14,14 @@ BIN_DIR=${BASE_DIR}/bin
 WORKLOAD_DIR=${WORK}/ici-workspace/sigcomm-exp/comio-lat-1-vs-bw-1/workloads/gfx950
 
 K1_PINNED_XCD=0
-K1_PINNED_HBM=0
+K1_PINNED_CC=0
 
 K2_PINNED_XCD=0
-K2_PINNED_HBM=0
+K2_PINNED_CC=0
 
 # K2_BPX_MIN=1
 # K2_BPX_MAX=1
-K2_TPB=1024
+K2_TPB=512
 
 # for i in {1..64}; do
 #     TARGET="bpx_${i}_${i}_tpb_${K2_TPB}_prof_gfx950"

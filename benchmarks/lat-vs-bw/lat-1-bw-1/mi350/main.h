@@ -13,6 +13,7 @@ using namespace std;
 
 #define L2_SIZE (4 * 1024 * 1024) // 4 MB
 #define LLC_SIZE (256 * 1024 * 1024) // 256 MB
+#define K2_CHUNK_SIZE (8 * 1024) // MI350 IOD/CC interleaving granularity
 
 // GPU error check
 #ifndef gpuErrchk

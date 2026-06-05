@@ -60,9 +60,7 @@ __global__ void identify_home(void *data, size_t size, uint32_t *d_cycles, int n
     // for this bmk, assert 1 tb per xcd
     assert(n_tbs_in_xcd * XCD_NUM == gridDim.x); assert(n_tbs_in_xcd == 1);
 
-    // for this bmk, assert 256 threads per block if chunk size is 4KB (128 for 2KB)
-    assert(blockDim.x == 128);
-    // assert(blockDim.x == 256);
+    assert(blockDim.x == K2_CHUNK_SIZE / sizeof(uint4));
 
     // for this bmk, both global_barrier and cooperative_groups are supported
     #if not USE_GLOBAL_BARRIER
@@ -173,7 +171,7 @@ int home_identification(
 
     for (int i = 0; i < k2_n_datas; i++) {
         #if DEBUG_K2_HOME
-        printf("Identifying home xcd for data[%d]...\n", i);
+        printf("Identifying home cc for data[%d]...\n", i);
         #endif
 
         void *kernel_args[] = {
@@ -187,7 +185,7 @@ int home_identification(
         gpuErrchk(hipLaunchCooperativeKernel(
             (void*)identify_home,
             dim3(XCD_NUM), // one block per xcd
-            dim3(128), // 128 threads per block
+            dim3(K2_CHUNK_SIZE / sizeof(uint4)),
             kernel_args,
             0,
             0
@@ -196,7 +194,7 @@ int home_identification(
         gpuErrchk(hipLaunchKernel(
             (void*)identify_home,
             dim3(XCD_NUM), // one block per xcd
-            dim3(128), // 128 threads per block
+            dim3(K2_CHUNK_SIZE / sizeof(uint4)),
             kernel_args,
             0,
             0
@@ -217,24 +215,34 @@ int home_identification(
         }
 
         for (size_t k = 0; k < k2_n_chunks; k++) {
-            uint32_t min_cycles = UINT32_MAX;
-            int min_xcc = -1;
+            uint64_t group_cycles[CC_NUM] = {};
+            uint32_t group_counts[CC_NUM] = {};
             for (int x = 0; x < XCD_NUM; x++) {
                 uint32_t c = h_cycles[x][k];
-                if (c < min_cycles) {
-                    min_cycles = c;
-                    min_xcc = x;
+                uint32_t cc = get_cc((uint32_t)x);
+                group_cycles[cc] += c;
+                group_counts[cc]++;
+            }
+
+            uint32_t home_cc = 0;
+            uint64_t min_group_cycles = UINT64_MAX;
+            for (uint32_t cc = 0; cc < CC_NUM; cc++) {
+                uint64_t avg_cycles = group_cycles[cc] / group_counts[cc];
+                if (avg_cycles < min_group_cycles) {
+                    min_group_cycles = avg_cycles;
+                    home_cc = cc;
                 }
             }
-            k2_h_home[i][k] = min_xcc;
-            k2_h_xcd_chunks_size[i][min_xcc]++;
+
+            k2_h_home[i][k] = home_cc;
+            k2_h_xcd_chunks_size[i][home_cc]++;
             #if DEBUG_K2_HOME
-            printf("data[%d] chunk[%zu]: home xcd %d\n", i, k, k2_h_home[i][k]);
+            printf("data[%d] chunk[%zu]: home cc %d\n", i, k, k2_h_home[i][k]);
             #endif
         }
         #if DEBUG_K2_HOME
-        for (int x = 0; x < XCD_NUM; x++) {
-            printf("data[%d] xcd %d: n_chunks %zu\n", i, x, k2_h_xcd_chunks_size[i][x]);
+        for (int x = 0; x < CC_NUM; x++) {
+            printf("data[%d] cc %d: n_chunks %zu\n", i, x, k2_h_xcd_chunks_size[i][x]);
         }
         printf("\n");
         #endif
@@ -247,7 +255,7 @@ __global__ void k(
     uint64_t *k2_chunks1, uint64_t *k2_chunks2, uint64_t *k2_chunks3, uint64_t *k2_chunks4,
     size_t *k2_offset1, size_t *k2_offset2, size_t *k2_offset3, size_t *k2_offset4,
     float *k2_sink, size_t *k2_chunks_size, const size_t k2_chunk_size, const int64_t k2_N,
-    const uint32_t k2_xcd, const uint32_t k2_hbm)
+    const uint32_t k2_xcd, const uint32_t k2_cc)
 {
 
     int bid = blockIdx.x;
@@ -278,7 +286,7 @@ __global__ void k(
 
     // E.g., if tpb = 1024 and chunk_size = 2048, n_chunks_per_iter_per_tb = 8
     const size_t n_chunks_per_iter_per_tb = (blockDim.x / (k2_chunk_size / 16));
-    size_t n_iter = k2_chunks_size[k2_hbm] / (n_tbs_in_xcd * n_chunks_per_iter_per_tb);
+    size_t n_iter = k2_chunks_size[k2_cc] / (n_tbs_in_xcd * n_chunks_per_iter_per_tb);
 
 #if 0
     // --- Previous Logic (Iterate strictly by n_iter) ---
@@ -298,10 +306,10 @@ __global__ void k(
         // and each thread in 128 threads of the chunk will handle different 16B offsets
         size_t thread_offset_in_chunk = tid % (k2_chunk_size / 16);
 
-        float4 *ptr_in1 = reinterpret_cast<float4*>(k2_chunks1[k2_offset1[k2_hbm] + chunk_idx]);
-        float4 *ptr_in2 = reinterpret_cast<float4*>(k2_chunks2[k2_offset2[k2_hbm] + chunk_idx]);
-        float4 *ptr_in3 = reinterpret_cast<float4*>(k2_chunks3[k2_offset3[k2_hbm] + chunk_idx]);
-        float4 *ptr_in4 = reinterpret_cast<float4*>(k2_chunks4[k2_offset4[k2_hbm] + chunk_idx]);
+        float4 *ptr_in1 = reinterpret_cast<float4*>(k2_chunks1[k2_offset1[k2_cc] + chunk_idx]);
+        float4 *ptr_in2 = reinterpret_cast<float4*>(k2_chunks2[k2_offset2[k2_cc] + chunk_idx]);
+        float4 *ptr_in3 = reinterpret_cast<float4*>(k2_chunks3[k2_offset3[k2_cc] + chunk_idx]);
+        float4 *ptr_in4 = reinterpret_cast<float4*>(k2_chunks4[k2_offset4[k2_cc] + chunk_idx]);
 
         asm volatile(
             "flat_load_dwordx4 %[OUT_D1],  %[IN_D1]\n\t"

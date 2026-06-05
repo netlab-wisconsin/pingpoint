@@ -27,24 +27,24 @@ typedef int64_t dtype;
 #define K1_PINNED_XCD 0
 #endif
 
-#ifndef K1_PINNED_HBM
-#define K1_PINNED_HBM 0
+#ifndef K1_PINNED_CC
+#define K1_PINNED_CC 0
 #endif
 
 #ifndef K2_PINNED_XCD
 #define K2_PINNED_XCD 1
 #endif
 
-#ifndef K2_PINNED_HBM
-#define K2_PINNED_HBM 1
+#ifndef K2_PINNED_CC
+#define K2_PINNED_CC 1
 #endif
 
 /*
  * (Note 01/25/25) While removed, two K2 flows were instantiated to test YX routing's path overlap
- * flow 1: K2_PINNED_XCD_1, K2_PINNED_HBM_1
- * flow 2: K2_PINNED_XCD_2, K2_PINNED_HBM_2
- * K1 was disabled, and K2 kernel preluded the two XCDs. k2_hbm was recognized using below code:
- * const uint32_t k2_hbm = (xcc_id == k2_xcd1) ? k2_hbm1 : k2_hbm2;
+ * flow 1: K2_PINNED_XCD_1, K2_PINNED_CC_1
+ * flow 2: K2_PINNED_XCD_2, K2_PINNED_CC_2
+ * K1 was disabled, and K2 kernel preluded the two XCDs. k2_cc was recognized using below code:
+ * const uint32_t k2_cc = (xcc_id == k2_xcd1) ? k2_cc1 : k2_cc2;
  */
 
 #ifndef SKIP_HOME_IDENTIFICATION
@@ -60,7 +60,7 @@ typedef int64_t dtype;
 #endif
 
 #ifndef K2_TPB
-#define K2_TPB 128
+#define K2_TPB 512
 #endif
 
 #ifndef EPOCHS
@@ -68,7 +68,7 @@ typedef int64_t dtype;
 #endif
 
 #define DEBUG_LEVEL 2
-#define FAST 1 // set for faster debugging, set 0 for actual measurement
+#define FAST 0 // set for faster debugging, set 0 for actual measurement
 
 int main(int argc, char **argv)
 {
@@ -80,8 +80,8 @@ int main(int argc, char **argv)
 #endif
 
 #if DEBUG_LEVEL >= 0
-    cout << "K1_PINNED_XCD: " << K1_PINNED_XCD << " " << "K1_PINNED_HBM: " << K1_PINNED_HBM << " "
-         << "K2_PINNED_XCD: " << K2_PINNED_XCD << " " << "K2_PINNED_HBM: " << K2_PINNED_HBM << " "
+    cout << "K1_PINNED_XCD: " << K1_PINNED_XCD << " " << "K1_PINNED_CC: " << K1_PINNED_CC << " "
+         << "K2_PINNED_XCD: " << K2_PINNED_XCD << " " << "K2_PINNED_CC: " << K2_PINNED_CC << " "
          << "\n" << flush;
 
     cout << "K2_TPB: " << K2_TPB << " "
@@ -103,7 +103,7 @@ int main(int argc, char **argv)
     // But don't further reduce LEN. 1<<15 is almost minimal for bypassing L2.
     const size_t LEN = (1 << 15);
     const size_t multiplicative_factor = XCD_NUM * 2;
-#elif 1
+#elif 0
     // Utilize HBM
     const size_t LEN = (1 << 22); // set to use HBM for K1
     const size_t multiplicative_factor = XCD_NUM * 1;
@@ -143,19 +143,19 @@ int main(int argc, char **argv)
         return -1;
 
 #if DEBUG_LEVEL >= 1
-    string level = xcd_dtypes[K1_PINNED_HBM].size() * sizeof(dtype) > L2_SIZE ?
-                    (xcd_dtypes[K1_PINNED_HBM].size() * sizeof(dtype) > LLC_SIZE ? "hbm" : "llc")
+    string level = xcd_dtypes[K1_PINNED_CC].size() * sizeof(dtype) > L2_SIZE ?
+                    (xcd_dtypes[K1_PINNED_CC].size() * sizeof(dtype) > LLC_SIZE ? "hbm" : "llc")
                     : "l2";
     assert (level != "l2"); // K1 data should be at least in LLC
-    cout << "K1 pinned data: " << "hbm" << K1_PINNED_HBM << " "
-            << xcd_dtypes[K1_PINNED_HBM].size() * sizeof(dtype) / (1024 * 1024) << "MB" << " "
+    cout << "K1 pinned data: " << "cc" << K1_PINNED_CC << " "
+            << xcd_dtypes[K1_PINNED_CC].size() * sizeof(dtype) / (1024 * 1024) << "MB" << " "
             << "at " << level << " "
             << "\n" << flush;
 #endif
 #else
-    // Skip home identification: populate xcd_cls[K1_PINNED_HBM] with all cache line indices
+    // Skip home identification: populate xcd_cls[K1_PINNED_CC] with all cache line indices
     for (size_t k = 0; k < n_cl_dbuf; k++)
-        xcd_cls[K1_PINNED_HBM].push_back((uint32_t)k);
+        xcd_cls[K1_PINNED_CC].push_back((uint32_t)k);
 #if DEBUG_LEVEL >= 1
     cout << "K1 home identification skipped: using all " << n_cl_dbuf << " cls\n" << flush;
 #endif
@@ -174,7 +174,7 @@ int main(int argc, char **argv)
     const int k2_page_size = (2 * 1024 * 1024); // 2MB huge page
     const long long k2_data_size = (k2_n_pages * k2_page_size);
 
-    const int k2_chunk_size = (2 * 1024); // 2KB
+    const int k2_chunk_size = K2_CHUNK_SIZE;
     const size_t k2_n_chunks = k2_data_size / k2_chunk_size;
 
     vector<char *> k2_d_data(k2_n_datas);
@@ -199,11 +199,11 @@ int main(int argc, char **argv)
             k2_h_xcd_chunks_size) == -1)
         return -1;
 #else
-    // Skip home identification: assign all chunks to K2_PINNED_HBM
+    // Skip home identification: assign all chunks to K2_PINNED_CC
     for (int i = 0; i < k2_n_datas; i++) {
         for (size_t k = 0; k < k2_n_chunks; k++) {
-            k2_h_home[i][k] = K2_PINNED_HBM;
-            k2_h_xcd_chunks_size[i][K2_PINNED_HBM]++;
+            k2_h_home[i][k] = K2_PINNED_CC;
+            k2_h_xcd_chunks_size[i][K2_PINNED_CC]++;
         }
     }
 #if DEBUG_LEVEL >= 1
@@ -260,21 +260,19 @@ int main(int argc, char **argv)
         }
     }
 
-    // ensure minimal 8MB = 2 * l2_size per-xcd chunks in order to thrash l2
-    // conservative. since 2 xcds on same iod actually share the home data, another approach can be
-    // ensure minimal 8MB per-iod chunks
-    const int min_n_chunks_per_xcd = ((4*2 * 1024 * 1024) / (k2_chunk_size)); // minimal #chunks >= 8MB
+    // ensure minimal 8MB = 2 * l2_size per-CC chunks in order to thrash l2
+    const int min_n_chunks_per_cc = ((4*2 * 1024 * 1024) / (k2_chunk_size)); // minimal #chunks >= 8MB
 
-    for (int x = 0; x < XCD_NUM; x++)
+    for (int x = 0; x < CC_NUM; x++)
     {
 #if DEBUG_LEVEL >= 2
-        printf("xcd %d: min n_chunks %zu\n", x, k2_xcd_chunks_size[x]);
+        printf("cc %d: min n_chunks %zu\n", x, k2_xcd_chunks_size[x]);
 #endif
 #if !SKIP_HOME_IDENTIFICATION
-        assert(k2_xcd_chunks_size[x] * k2_n_datas >= min_n_chunks_per_xcd); // k2_xcd_chunks_size[x] is minimal #chunks per xcd among all datas.
+        assert(k2_xcd_chunks_size[x] * k2_n_datas >= min_n_chunks_per_cc); // k2_xcd_chunks_size[x] is minimal #chunks per cc among all datas.
 #else
-        if (x == K2_PINNED_HBM)
-            assert(k2_xcd_chunks_size[x] * k2_n_datas >= min_n_chunks_per_xcd);
+        if (x == K2_PINNED_CC)
+            assert(k2_xcd_chunks_size[x] * k2_n_datas >= min_n_chunks_per_cc);
 #endif
     }
 
@@ -285,7 +283,7 @@ int main(int argc, char **argv)
     // safety check
     size_t k2_total_pinned_chunks = accumulate(k2_h_xcd_chunks_size.begin(), k2_h_xcd_chunks_size.end(), 0UL,
                                                [](size_t sum, const auto &row)
-                                               { return sum + row[K2_PINNED_HBM]; });
+                                               { return sum + row[K2_PINNED_CC]; });
 
 #if 1
     // Utilize HBM
@@ -296,16 +294,17 @@ int main(int argc, char **argv)
 #endif
 
 #if DEBUG_LEVEL >= 1
-    cout << "K2 pinned data: "<< "hbm" << K2_PINNED_HBM << " "
-        << (k2_h_xcd_chunks_size[0][K2_PINNED_HBM] + k2_h_xcd_chunks_size[1][K2_PINNED_HBM] + \
-            k2_h_xcd_chunks_size[2][K2_PINNED_HBM] + k2_h_xcd_chunks_size[3][K2_PINNED_HBM]) * \
+    cout << "K2 pinned data: "<< "cc" << K2_PINNED_CC << " "
+        << (k2_h_xcd_chunks_size[0][K2_PINNED_CC] + k2_h_xcd_chunks_size[1][K2_PINNED_CC] + \
+            k2_h_xcd_chunks_size[2][K2_PINNED_CC] + k2_h_xcd_chunks_size[3][K2_PINNED_CC]) * \
             k2_chunk_size / (1024 * 1024) << "MB "
         << "\n" << flush;
 #endif
 
     ////////////////////////// MAIN TEST LOOP //////////////////////////
 
-    unsigned int clock = getGPUClock();
+    // unsigned int clock = getGPUClock();
+    unsigned int clock = 2200; // set to 2200MHz as mi3508x node has some issue.
 
     cout << setw(3) << "BPX" << " "
          << setw(5) << "Clk" << " "
@@ -390,7 +389,7 @@ int main(int argc, char **argv)
             vector<uint32_t> seq(LEN);
             for (int64_t i = 0; i < LEN; i++)
             {
-                seq[i] = xcd_cls[K1_PINNED_HBM][(size_t)i];
+                seq[i] = xcd_cls[K1_PINNED_CC][(size_t)i];
             }
             shuffle(seq.begin(), seq.end(), g);
 
@@ -503,7 +502,7 @@ int main(int argc, char **argv)
             k2::k<<<dim3(k2_n_blocks), dim3(k2_n_threads_per_block), 0, k2_stream>>>(
                 k2_d_xcd_chunks[0], k2_d_xcd_chunks[1], k2_d_xcd_chunks[2], k2_d_xcd_chunks[3],
                 k2_d_xcd_chunks_offset[0], k2_d_xcd_chunks_offset[1], k2_d_xcd_chunks_offset[2], k2_d_xcd_chunks_offset[3],
-                k2_dummy_sink, k2_d_xcd_chunks_size, k2_chunk_size, k2_iters, K2_PINNED_XCD, K2_PINNED_HBM);
+                k2_dummy_sink, k2_d_xcd_chunks_size, k2_chunk_size, k2_iters, K2_PINNED_XCD, K2_PINNED_CC);
             gpuErrchk(hipEventRecord(k2_stop, k2_stream));
 
             // K1 launch
