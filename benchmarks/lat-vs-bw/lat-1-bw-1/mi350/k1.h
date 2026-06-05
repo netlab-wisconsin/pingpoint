@@ -225,27 +225,24 @@ int home_identification(
     #endif
 
     // boundary check
-    // single-CC LLC range is 1MB - 16MB
+    // single-CC LLC range is 2MB - 128MB
     for (int x = 0; x < CC_NUM; x++) {
 #if 0
-        if (xcd_cls[x].size() * cl_bytes < (64 * 1024 * 1024)) {
+        if (xcd_cls[x].size() * cl_bytes < (2 * 1024 * 1024)) {
             cout << "K1 pinned CC" << "[" << x << "]" << " chunks size " << xcd_cls[x].size() * cl_bytes / (1024 * 1024) << " MB" //
-                << " is smaller than 64 MB" << "\n" << flush;
-            return -1;
-        }
-#else
-        if (xcd_cls[x].size() * cl_bytes < (1 * 1024 * 1024)) {
-            cout << "K1 pinned CC" << "[" << x << "]" << " chunks size " << xcd_cls[x].size() * cl_bytes / (1024 * 1024) << " MB" //
-                << " is smaller than 1 MB" << "\n" << flush;
+                << " is smaller than 2 MB" << "\n" << flush;
             return -1;
         }
 
-        if (xcd_cls[x].size() * cl_bytes > (16 * 1024 * 1024)) {
+        if (xcd_cls[x].size() * cl_bytes > (128 * 1024 * 1024)) {
             cout << "K1 pinned CC" << "[" << x << "]" << " chunks size " << xcd_cls[x].size() * cl_bytes / (1024 * 1024) << " MB" //
-                << " is larger than 16 MB" << "\n" << flush;
+                << " is larger than 128 MB" << "\n" << flush;
             return -1;
         }
+#else
+            cout << "K1 pinned CC" << "[" << x << "]" << " chunks size " << xcd_cls[x].size() * cl_bytes / (1024 * 1024) << " MB" << "\n" << flush;
 #endif
+
     }
 
     return 0;

@@ -52,7 +52,7 @@ typedef int64_t dtype;
 #endif
 
 #ifndef K1_UTILIZE_HBM
-#define K1_UTILIZE_HBM 0
+#define K1_UTILIZE_HBM 1
 #endif
 
 #ifndef K2_BPX_MIN
@@ -106,15 +106,15 @@ int main(int argc, char **argv)
     // When profiling, use reduced LEN with *2 mult factor to avoid below OOB error
     // But don't further reduce LEN. 1<<15 is almost minimal for bypassing L2.
     const size_t LEN = (1 << 15);
-    const size_t multiplicative_factor = XCD_NUM * 2;
+    const size_t multiplicative_factor = CC_NUM * 2;
 #elif K1_UTILIZE_HBM
     // Utilize HBM
     const size_t LEN = (1 << 22); // set to use HBM for K1
-    const size_t multiplicative_factor = XCD_NUM * 1;
+    const size_t multiplicative_factor = CC_NUM * 1;
 #else
     // Utilize LLC
     const size_t LEN = (1 << 15); // set to use LLC for K1
-    const size_t multiplicative_factor = XCD_NUM * 1;
+    const size_t multiplicative_factor = CC_NUM * 1;
 #endif
 
     const size_t cl_size = cl_bytes / sizeof(dtype);
