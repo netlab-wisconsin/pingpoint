@@ -22,7 +22,7 @@ K2_TPB := 512
 
 SUFFIX := run_gfx950
 
-TARGET := $(BIN_DIR)//lat_xcd_$(K1_PINNED_XCD)_cc_$(K1_PINNED_CC)_bw_xcd_$(K2_PINNED_XCD)_cc_$(K2_PINNED_CC)_bpx_$(K2_BPX_MIN)_$(K2_BPX_MAX)_tpb_$(K2_TPB)_$(SUFFIX)
+TARGET := $(BIN_DIR)/lat_xcd_$(K1_PINNED_XCD)_cc_$(K1_PINNED_CC)_bw_xcd_$(K2_PINNED_XCD)_cc_$(K2_PINNED_CC)_bpx_$(K2_BPX_MIN)_$(K2_BPX_MAX)_tpb_$(K2_TPB)_$(SUFFIX)
 
 all: $(TARGET)
 
@@ -32,7 +32,6 @@ $(TARGET): main.cpp main.h k1.h k2.h
 	-DK1_PINNED_CC=$(K1_PINNED_CC) -DK2_PINNED_CC=$(K2_PINNED_CC) \
 	-DK2_BPX_MIN=$(K2_BPX_MIN) -DK2_BPX_MAX=$(K2_BPX_MAX) \
 	-DK2_TPB=$(K2_TPB) \
-	-DSKIP_HOME_IDENTIFICATION=1 \
 	-o $@ $<
 
 clean: 

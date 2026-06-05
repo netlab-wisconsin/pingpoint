@@ -51,6 +51,10 @@ typedef int64_t dtype;
 #define SKIP_HOME_IDENTIFICATION 0
 #endif
 
+#ifndef K1_UTILIZE_HBM
+#define K1_UTILIZE_HBM 0
+#endif
+
 #ifndef K2_BPX_MIN
 #define K2_BPX_MIN 1
 #endif
@@ -103,13 +107,13 @@ int main(int argc, char **argv)
     // But don't further reduce LEN. 1<<15 is almost minimal for bypassing L2.
     const size_t LEN = (1 << 15);
     const size_t multiplicative_factor = XCD_NUM * 2;
-#elif 0
+#elif K1_UTILIZE_HBM
     // Utilize HBM
     const size_t LEN = (1 << 22); // set to use HBM for K1
     const size_t multiplicative_factor = XCD_NUM * 1;
 #else
     // Utilize LLC
-    const size_t LEN = (1 << 16); // set to use LLC for K1
+    const size_t LEN = (1 << 15); // set to use LLC for K1
     const size_t multiplicative_factor = XCD_NUM * 1;
 #endif
 
@@ -211,7 +215,7 @@ int main(int argc, char **argv)
 #endif
 #endif
 
-    /* group per-xcd chunk pointers */
+    /* group per-CC chunk pointers */
 
     vector<vector<vector<uint64_t>>> k2_xcd_chunks(k2_n_datas, vector<vector<uint64_t>>(XCD_NUM));
     for (int i = 0; i < k2_n_datas; i++)
@@ -224,11 +228,11 @@ int main(int argc, char **argv)
     // safety check
     for (int i = 0; i < k2_n_datas; i++)
     {
-        for (int x = 0; x < XCD_NUM; x++)
+        for (int x = 0; x < CC_NUM; x++)
         {
             assert(k2_xcd_chunks[i][x].size() == k2_h_xcd_chunks_size[i][x]);
 #if DEBUG_LEVEL >= 2
-            printf("data[%d] xcd %d: n_chunks %zu\n", i, x, k2_xcd_chunks[i][x].size());
+            printf("data[%d] cc %d: n_chunks %zu\n", i, x, k2_xcd_chunks[i][x].size());
 #endif
         }
     }
@@ -249,7 +253,7 @@ int main(int argc, char **argv)
         }
     }
 
-    /* count # per-xcd chunk */
+    /* count # per-CC chunk */
 
     vector<size_t> k2_xcd_chunks_size(XCD_NUM, SIZE_MAX);
     for (int i = 0; i < k2_n_datas; i++) {

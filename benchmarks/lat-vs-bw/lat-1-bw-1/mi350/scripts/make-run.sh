@@ -1,8 +1,18 @@
 #!/bin/bash
 
-K2_BPX_MIN=1
-K2_BPX_MAX=128
+## Note that K1 going to LLC or HBM is controlled in the main by K1_UTILIZE_HBM
+## Set accordingly to test COM-IO or IO-MEM.
+## Just keep K2 to go to HBM (also in the main)
 
-make -B -f Makefile.run K1_PINNED_XCD=0 K1_PINNED_CC=0 K2_PINNED_XCD=0 K2_PINNED_CC=0 \
-    K2_BPX_MIN=${K2_BPX_MIN} K2_BPX_MAX=${K2_BPX_MAX} K2_TPB=512 \
-    BIN_DIR=${HOME}/workspace/ici-workspace/ici/benchmarks/lat-vs-bw/lat-1-bw-1/gfx950/bin
+SUFFIX=iomem # set accordingly
+K1_XCD=0
+K2_XCD=1
+
+for K1_CC in 0 1; do
+    for K2_CC in 0 1; do
+        make -B -f Makefile.run \
+            K1_PINNED_XCD=${K1_XCD} K1_PINNED_CC=${K1_CC} \
+            K2_PINNED_XCD=${K2_XCD} K2_PINNED_CC=${K2_CC} \
+            SUFFIX=${SUFFIX}
+    done
+done

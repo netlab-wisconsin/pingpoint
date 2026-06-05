@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# for i in {1..64}; do
 for i in {1..128}; do
     K2_BPX_MIN=${i}
     K2_BPX_MAX=${i}

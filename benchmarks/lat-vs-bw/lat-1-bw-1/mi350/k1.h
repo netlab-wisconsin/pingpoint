@@ -217,10 +217,10 @@ int home_identification(
     gpuErrchk(hipFree(d_cycles));
 
     #if DEBUG_K1_HOME
-    for (int x = 0; x < XCD_NUM; x++) {
-        cout << "XCD " << x << " has " << xcd_dtypes[x].size() << " dtypes.\n";
-        cout << "XCD " << x << " has " << xcd_cls[x].size() << " cache lines.\n";
-        cout << "XCD " << x << " has " << xcd_cls[x].size() * cl_bytes / (1024 * 1024) << " MB of pinned HBM chunks.\n";
+    for (int x = 0; x < CC_NUM; x++) {
+        cout << "CC " << x << " has " << xcd_dtypes[x].size() << " dtypes.\n";
+        cout << "CC " << x << " has " << xcd_cls[x].size() << " cache lines.\n";
+        cout << "CC " << x << " has " << xcd_cls[x].size() * cl_bytes / (1024 * 1024) << " MB of pinned chunks.\n";
     }
     #endif
 
@@ -229,19 +229,19 @@ int home_identification(
     for (int x = 0; x < CC_NUM; x++) {
 #if 0
         if (xcd_cls[x].size() * cl_bytes < (64 * 1024 * 1024)) {
-            cout << "K1 pinned HBM" << "[" << x << "]" << " chunks size " << xcd_cls[x].size() * cl_bytes / (1024 * 1024) << " MB" //
+            cout << "K1 pinned CC" << "[" << x << "]" << " chunks size " << xcd_cls[x].size() * cl_bytes / (1024 * 1024) << " MB" //
                 << " is smaller than 64 MB" << "\n" << flush;
             return -1;
         }
 #else
         if (xcd_cls[x].size() * cl_bytes < (1 * 1024 * 1024)) {
-            cout << "K1 pinned HBM" << "[" << x << "]" << " chunks size " << xcd_cls[x].size() * cl_bytes / (1024 * 1024) << " MB" //
+            cout << "K1 pinned CC" << "[" << x << "]" << " chunks size " << xcd_cls[x].size() * cl_bytes / (1024 * 1024) << " MB" //
                 << " is smaller than 1 MB" << "\n" << flush;
             return -1;
         }
 
         if (xcd_cls[x].size() * cl_bytes > (16 * 1024 * 1024)) {
-            cout << "K1 pinned HBM" << "[" << x << "]" << " chunks size " << xcd_cls[x].size() * cl_bytes / (1024 * 1024) << " MB" //
+            cout << "K1 pinned CC" << "[" << x << "]" << " chunks size " << xcd_cls[x].size() * cl_bytes / (1024 * 1024) << " MB" //
                 << " is larger than 16 MB" << "\n" << flush;
             return -1;
         }
