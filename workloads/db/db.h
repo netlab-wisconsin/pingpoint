@@ -107,6 +107,10 @@ namespace db_cg = cooperative_groups;
 #define P_ACTIVE_XCD 2
 #endif
 
+#ifndef P_TARGET_CC
+#define P_TARGET_CC 2
+#endif
+
 #ifndef P_ARRIVAL_QPS
 #define P_ARRIVAL_QPS 500000
 #endif
@@ -119,6 +123,10 @@ namespace db_cg = cooperative_groups;
 
 #if P_ACTIVE_XCD < 0 || P_ACTIVE_XCD >= XCD_NUM
 #error "P_ACTIVE_XCD must be in [0, XCD_NUM)"
+#endif
+
+#if P_TARGET_CC < 0 || P_TARGET_CC >= CC_NUM
+#error "P_TARGET_CC must be in [0, CC_NUM)"
 #endif
 
 #if P_ARRIVAL_QPS <= 0
@@ -354,18 +362,12 @@ struct VecScanTargetFn {
     }
 };
 
-// Persistent priority ANN engine. Request IDs are generated from a fixed-rate
-// time schedule, independent of completion rate, so congestion builds a queue.
+// Persistent priority embedding scan. Requests arrive at a fixed rate and
+// traverse every chunk in the target CC uniformly.
 struct PriorityEngineArgs {
-    const uint64_t *__restrict__ hot_chunk_ptrs;
-    const float    *__restrict__ cold_entries;
-    const float    *__restrict__ query_vecs;
-    const int      *__restrict__ candidate_ids;
-    float          *__restrict__ results;
-    int            *__restrict__ result_ids;
-    int Q;
-    int N_COLD;
-    int n_candidates;
+    const uint64_t *__restrict__ chunk_ptrs;
+    float          *__restrict__ worker_sinks;
+    size_t n_chunks;
     int priority_xcd;
     int worker_limit;
     uint64_t arrival_interval_cycles;
@@ -389,6 +391,7 @@ __global__ void priority_engine(PriorityEngineArgs *a)
         return;
 
     __shared__ int active_worker;
+    __shared__ int worker_slot;
     __shared__ int should_stop;
     __shared__ unsigned long long request_id;
     __shared__ unsigned long long arrival_cycle;
@@ -396,6 +399,7 @@ __global__ void priority_engine(PriorityEngineArgs *a)
 
     if (tid == 0) {
         unsigned long long slot = atomicAdd(a->worker_slots_claimed, 1ULL);
+        worker_slot = (int)slot;
         active_worker = slot < (unsigned long long)a->worker_limit;
     }
     __syncthreads();
@@ -440,44 +444,26 @@ __global__ void priority_engine(PriorityEngineArgs *a)
         if (should_stop)
             break;
 
-        const int q = (int)(request_id % (unsigned long long)a->Q);
+        const size_t chunk_index =
+            (size_t)(request_id % (unsigned long long)a->n_chunks);
+        const float *target =
+            reinterpret_cast<const float *>(a->chunk_ptrs[chunk_index]);
         const unsigned long long service_start = __builtin_readcyclecounter();
-        float best_score = -FLT_MAX;
-        int best_id = -1;
+        float partial = 0.0f;
+        for (int d = tid; d < DB_ENTRY_DIM; d += blockDim.x)
+            partial += target[d];
 
-        for (int ci = 0; ci < a->n_candidates; ci++) {
-            const int cand_id = a->candidate_ids[(size_t)q * a->n_candidates + ci];
-            const float *target;
-            if (cand_id < N_HOT_CHUNKS) {
-                target = reinterpret_cast<const float *>(a->hot_chunk_ptrs[cand_id]);
-            } else {
-                const int cold_id = cand_id - N_HOT_CHUNKS;
-                target = a->cold_entries + (size_t)(cold_id % a->N_COLD) * DB_ENTRY_DIM;
-            }
-
-            float partial = 0.0f;
-            for (int d = tid; d < DB_ENTRY_DIM; d += blockDim.x)
-                partial += a->query_vecs[(size_t)q * DB_ENTRY_DIM + d] * target[d];
-
-            reduction[tid] = partial;
-            __syncthreads();
-            for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
-                if (tid < s)
-                    reduction[tid] += reduction[tid + s];
-                __syncthreads();
-            }
-            if (tid == 0 && reduction[0] > best_score) {
-                best_score = reduction[0];
-                best_id = cand_id;
-            }
+        reduction[tid] = partial;
+        __syncthreads();
+        for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+            if (tid < s)
+                reduction[tid] += reduction[tid + s];
             __syncthreads();
         }
 
         if (tid == 0) {
             const unsigned long long completion = __builtin_readcyclecounter();
-            a->results[q] = best_score;
-            if (a->result_ids)
-                a->result_ids[q] = best_id;
+            a->worker_sinks[worker_slot] = reduction[0];
             if (a->metrics_capacity > 0) {
                 const size_t slot = (size_t)(request_id % a->metrics_capacity);
                 a->queue_latencies[slot] = completion - arrival_cycle;

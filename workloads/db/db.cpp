@@ -660,9 +660,6 @@ int main(int argc, char **argv) {
     // Total embedding entries (argv[1]).
     char *db_flat_data = nullptr;
     const int N_DB_ENTRIES = (argc > 1) ? atoi(argv[1]) : (1 << 19); // 524288
-    const int Q = N_DB_ENTRIES;
-    const int N_COLD = max(Q, 1024);
-    const int xcd_per_cc = XCD_NUM / CC_NUM;
     assert(N_DB_ENTRIES % 32768 == 0 && "N_DB_ENTRIES must be a multiple of 32768 (64MB / CHUNK_SIZE)");
     const size_t db_flat_size = (size_t)N_DB_ENTRIES * CHUNK_SIZE; // CHUNK_SIZE = DB_ENTRY_DIM * sizeof(float) = 2KB
     gpuErrchk(hipMalloc(&db_flat_data, db_flat_size));
@@ -685,270 +682,272 @@ int main(int argc, char **argv) {
     }
 #endif
 
-    for (int cc : {DB_VECSCAN_ORIGINAL_HBM / xcd_per_cc,
-                   DB_VECSCAN_MIGRATED_HBM / xcd_per_cc}) {
-        if (db_chunks_per_cc[cc].size() < N_HOT_CHUNKS) {
-            fprintf(stderr, "[DB] CC%d has only %zu embedding entries; need %d\n",
-                    cc, db_chunks_per_cc[cc].size(), N_HOT_CHUNKS);
-            return 1;
-        }
+    const vector<uint64_t> &priority_chunks = db_chunks_per_cc[P_TARGET_CC];
+    if (priority_chunks.empty()) {
+        fprintf(stderr, "[DB P] target CC%d has no classified embedding chunks\n",
+                P_TARGET_CC);
+        return 1;
     }
 
-    auto make_db_chunk_ptrs = [](const vector<uint64_t> &chunks) {
-        uint64_t *d_ptrs = nullptr;
-        gpuErrchk(hipMalloc(&d_ptrs, sizeof(uint64_t) * N_HOT_CHUNKS));
-        gpuErrchk(hipMemcpy(d_ptrs, chunks.data(), sizeof(uint64_t) * N_HOT_CHUNKS,
-                            hipMemcpyHostToDevice));
-        return d_ptrs;
-    };
+    uint64_t *d_priority_chunk_ptrs = nullptr;
+    gpuErrchk(hipMalloc(&d_priority_chunk_ptrs,
+                        sizeof(uint64_t) * priority_chunks.size()));
+    gpuErrchk(hipMemcpy(d_priority_chunk_ptrs, priority_chunks.data(),
+                        sizeof(uint64_t) * priority_chunks.size(),
+                        hipMemcpyHostToDevice));
+    const size_t priority_metrics_capacity = (size_t)N_DB_ENTRIES;
 
-    uint64_t *d_vecscan_original_chunk_ptrs =
-        make_db_chunk_ptrs(db_chunks_per_cc[DB_VECSCAN_ORIGINAL_HBM / xcd_per_cc]);
-    uint64_t *d_vecscan_migrated_chunk_ptrs =
-        make_db_chunk_ptrs(db_chunks_per_cc[DB_VECSCAN_MIGRATED_HBM / xcd_per_cc]);
-
-    // Allocate and fill synthetic IVF-like ANN corpus, queries, and candidate lists.
-    float *d_query_vecs  = nullptr;
-    float *d_cold_entries = nullptr;
-    float *d_results      = nullptr;
-    float *d_priority_results = nullptr;
-    int   *d_candidate_ids = nullptr;
-    int   *d_result_ids    = nullptr;
-    int   *d_priority_result_ids = nullptr;
-
-    gpuErrchk(hipMalloc(&d_query_vecs,   sizeof(float) * (size_t)Q      * DB_ENTRY_DIM));
-    gpuErrchk(hipMalloc(&d_cold_entries, sizeof(float) * (size_t)N_COLD * DB_ENTRY_DIM));
-    gpuErrchk(hipMalloc(&d_results,      sizeof(float) * Q));
-    gpuErrchk(hipMalloc(&d_priority_results, sizeof(float) * Q));
-    gpuErrchk(hipMalloc(&d_candidate_ids,
-                        sizeof(int) * (size_t)Q * DB_CANDIDATES_PER_QUERY));
-    gpuErrchk(hipMalloc(&d_result_ids,   sizeof(int)   * Q));
-    gpuErrchk(hipMalloc(&d_priority_result_ids, sizeof(int) * Q));
-
-    build_synthetic_ann_dataset(Q, N_COLD,
-                                d_vecscan_original_chunk_ptrs,
-                                d_vecscan_migrated_chunk_ptrs,
-                                d_query_vecs, d_cold_entries, d_candidate_ids);
-    gpuErrchk(hipStreamSynchronize(stream));
-
-    // hipFree performs an implicit device-wide synchronize. Defer temporary
-    // frees until the persistent P kernel has stopped.
-    vector<void *> deferred_frees;
+    float *d_priority_worker_sinks = nullptr;
+    gpuErrchk(hipMalloc(&d_priority_worker_sinks, sizeof(float) * P_WORKERS));
+    gpuErrchk(hipMemset(d_priority_worker_sinks, 0, sizeof(float) * P_WORKERS));
+    gpuErrchk(hipMemset(db_flat_data, 1, db_flat_size));
 
     // -------------------------------------------------------------------------
-    // Launch the open-loop priority ANN engine on XCD2.
+    // Launch the open-loop priority embedding scan on P_ACTIVE_XCD.
     // hipExtStreamCreateWithCUMask applies the first P_WORKERS-CU mask to each
-    // XCD; the kernel's hardware-XCD check leaves only XCD2 active.
+    // XCD; the kernel's hardware-XCD check leaves only P_ACTIVE_XCD active.
     // -------------------------------------------------------------------------
     hipStream_t priority_stream;
     uint32_t priority_cu_mask_size = 0;
     vector<uint32_t> priority_cu_mask;
-    assert(mask_cu(P_WORKERS, priority_cu_mask_size, priority_cu_mask) == P_WORKERS);
+    const uint64_t priority_cu_bits = (1ULL << P_WORKERS) - 1ULL;
+    assert(mask_cu(priority_cu_bits, priority_cu_mask_size, priority_cu_mask) == P_WORKERS);
     gpuErrchk(hipExtStreamCreateWithCUMask(
         &priority_stream, priority_cu_mask_size, priority_cu_mask.data()));
+#if DEBUG_DB && (DEBUG_LEVEL >= 1)
+    printf("[DB P] active CUs per XCD:\n");
+    for (int xcd = 0; xcd < XCD_NUM; xcd++) {
+        printf("  XCD%d:", xcd);
+        if (xcd != P_ACTIVE_XCD) {
+            printf(" none\n");
+            continue;
+        }
+        for (int cu = 0; cu < CU_NUM; cu++) {
+            if ((priority_cu_bits >> cu) & 1ULL)
+                printf(" CU%d", cu);
+        }
+        printf("\n");
+    }
+#endif
 
-    int *d_priority_stop = nullptr;
-    unsigned long long *d_priority_start = nullptr;
-    unsigned long long *d_priority_next = nullptr;
-    unsigned long long *d_priority_completed = nullptr;
-    unsigned long long *d_priority_worker_slots = nullptr;
-    uint64_t *d_priority_queue_latencies = nullptr;
-    uint64_t *d_priority_service_latencies = nullptr;
     PriorityEngineArgs *d_priority_args = nullptr;
+    {
+        int *d_priority_stop = nullptr;
+        unsigned long long *d_priority_start = nullptr;
+        unsigned long long *d_priority_next = nullptr;
+        unsigned long long *d_priority_completed = nullptr;
+        unsigned long long *d_priority_worker_slots = nullptr;
+        uint64_t *d_priority_queue_latencies = nullptr;
+        uint64_t *d_priority_service_latencies = nullptr;
 
-    gpuErrchk(hipMalloc(&d_priority_stop, sizeof(int)));
-    gpuErrchk(hipMalloc(&d_priority_start, sizeof(unsigned long long)));
-    gpuErrchk(hipMalloc(&d_priority_next, sizeof(unsigned long long)));
-    gpuErrchk(hipMalloc(&d_priority_completed, sizeof(unsigned long long)));
-    gpuErrchk(hipMalloc(&d_priority_worker_slots, sizeof(unsigned long long)));
-    gpuErrchk(hipMalloc(&d_priority_queue_latencies, sizeof(uint64_t) * Q));
-    gpuErrchk(hipMalloc(&d_priority_service_latencies, sizeof(uint64_t) * Q));
-    gpuErrchk(hipMemset(d_priority_stop, 0, sizeof(int)));
-    gpuErrchk(hipMemset(d_priority_start, 0, sizeof(unsigned long long)));
-    gpuErrchk(hipMemset(d_priority_next, 0, sizeof(unsigned long long)));
-    gpuErrchk(hipMemset(d_priority_completed, 0, sizeof(unsigned long long)));
-    gpuErrchk(hipMemset(d_priority_worker_slots, 0, sizeof(unsigned long long)));
-    gpuErrchk(hipMemset(d_priority_queue_latencies, 0, sizeof(uint64_t) * Q));
-    gpuErrchk(hipMemset(d_priority_service_latencies, 0, sizeof(uint64_t) * Q));
+        gpuErrchk(hipMalloc(&d_priority_stop, sizeof(int)));
+        gpuErrchk(hipMalloc(&d_priority_start, sizeof(unsigned long long)));
+        gpuErrchk(hipMalloc(&d_priority_next, sizeof(unsigned long long)));
+        gpuErrchk(hipMalloc(&d_priority_completed, sizeof(unsigned long long)));
+        gpuErrchk(hipMalloc(&d_priority_worker_slots, sizeof(unsigned long long)));
+        gpuErrchk(hipMalloc(&d_priority_queue_latencies,
+                            sizeof(uint64_t) * priority_metrics_capacity));
+        gpuErrchk(hipMalloc(&d_priority_service_latencies,
+                            sizeof(uint64_t) * priority_metrics_capacity));
+        gpuErrchk(hipMemset(d_priority_stop, 0, sizeof(int)));
+        gpuErrchk(hipMemset(d_priority_start, 0, sizeof(unsigned long long)));
+        gpuErrchk(hipMemset(d_priority_next, 0, sizeof(unsigned long long)));
+        gpuErrchk(hipMemset(d_priority_completed, 0, sizeof(unsigned long long)));
+        gpuErrchk(hipMemset(d_priority_worker_slots, 0, sizeof(unsigned long long)));
+        gpuErrchk(hipMemset(d_priority_queue_latencies, 0,
+                            sizeof(uint64_t) * priority_metrics_capacity));
+        gpuErrchk(hipMemset(d_priority_service_latencies, 0,
+                            sizeof(uint64_t) * priority_metrics_capacity));
+        
+        // P_ARRIVAL_QPS sets the desired open-loop request arrival rate.
+        // priority_arrival_interval_cycles converts that rate into GPU clock cycles
+        // Each request is scheduled one interval apart, independent of completion rate. 
+        // If processing falls behind, requests queue and queue latency increases.
+        const uint64_t priority_arrival_interval_cycles =
+            max<uint64_t>(1, ((uint64_t)clock * 1000000ULL) / (uint64_t)P_ARRIVAL_QPS);
+        PriorityEngineArgs h_priority_args = {
+            d_priority_chunk_ptrs, d_priority_worker_sinks, priority_chunks.size(),
+            P_ACTIVE_XCD, P_WORKERS, priority_arrival_interval_cycles,
+            d_priority_stop, d_priority_start, d_priority_next, d_priority_completed,
+            d_priority_worker_slots, d_priority_queue_latencies,
+            d_priority_service_latencies, priority_metrics_capacity
+        };
 
-    const uint64_t priority_arrival_interval_cycles =
-        max<uint64_t>(1, ((uint64_t)clock * 1000000ULL) / (uint64_t)P_ARRIVAL_QPS);
-    PriorityEngineArgs h_priority_args = {
-        d_vecscan_original_chunk_ptrs, d_cold_entries, d_query_vecs, d_candidate_ids,
-        d_priority_results, d_priority_result_ids,
-        Q, N_COLD, DB_CANDIDATES_PER_QUERY,
-        P_ACTIVE_XCD, P_WORKERS, priority_arrival_interval_cycles,
-        d_priority_stop, d_priority_start, d_priority_next, d_priority_completed,
-        d_priority_worker_slots, d_priority_queue_latencies,
-        d_priority_service_latencies, (size_t)Q
-    };
-    gpuErrchk(hipMalloc(&d_priority_args, sizeof(PriorityEngineArgs)));
-    gpuErrchk(hipMemcpy(d_priority_args, &h_priority_args, sizeof(PriorityEngineArgs),
-                        hipMemcpyHostToDevice));
+        gpuErrchk(hipMalloc(&d_priority_args, sizeof(PriorityEngineArgs)));
+        gpuErrchk(hipMemcpy(d_priority_args, &h_priority_args, sizeof(PriorityEngineArgs),
+                            hipMemcpyHostToDevice));
 
-    printf("[DB P] launching open-loop ANN engine: XCD%d, workers=%d, block=%d, "
-           "arrival=%d QPS, interval=%" PRIu64 " cycles\n",
-           P_ACTIVE_XCD, P_WORKERS, P_BLOCKDIM_X, P_ARRIVAL_QPS,
-           priority_arrival_interval_cycles);
+#if DEBUG_DB && (DEBUG_LEVEL >= 0)
+        printf("[DB P] open-loop embedding scan args: "
+            "XCD%d -> CC%d, "
+            "chunks=%zu, workers=%d, block=%d, "
+            "arrival=%d QPS, interval=%" PRIu64 " cycles\n",
+            P_ACTIVE_XCD, P_TARGET_CC, priority_chunks.size(),
+            P_WORKERS, P_BLOCKDIM_X, P_ARRIVAL_QPS,
+            priority_arrival_interval_cycles);
+#endif
+    }
+
+    // Launch the priority engine kernel.
     hipLaunchKernelGGL(priority_engine,
                        dim3(P_WORKERS * XCD_NUM), dim3(P_BLOCKDIM_X),
                        0, priority_stream, d_priority_args);
     gpuErrchk(hipGetLastError());
 
-    // =========================================================================
-    // PPNT EXECUTION WITH DB KERNELS
-    // =========================================================================
+    // // =========================================================================
+    // // PPNT EXECUTION WITH DB KERNELS
+    // // =========================================================================
 
-    // 0. PPNT-only baseline — pings run without any DB kernel
-    {
-        printf("\n\nPPNT ONLY BASELINE\n");
-        ppnt::TargetArgsT h_args{};
-        ppnt::TargetArgsT *d_args = nullptr;
-        gpuErrchk(hipMalloc(&d_args, sizeof(ppnt::TargetArgsT)));
-        gpuErrchk(hipMemcpy(d_args, &h_args, sizeof(ppnt::TargetArgsT), hipMemcpyHostToDevice));
-        ppnt::TargetFnT fn{};
-        size_t _n_plan = n_plan;
-        void *kargs[] = {(void *)&fn, (void *)&d_args, (void *)&d_plan,
-                         (void *)&_n_plan, (void *)&d_out};
-        gpuErrchk(hipLaunchCooperativeKernel(
-            (void *)ppnt::fused_kernel<ppnt::TargetFnT, ppnt::TargetArgsT>,
-            dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
-        gpuErrchk(hipStreamSynchronize(stream));
-        ppnt::parse_pingouts(d_plan, d_out, _n_plan, TARGET_BLOCKDIM_X, clock);
-        deferred_frees.push_back(d_args);
-    }
+    // // 0. PPNT-only baseline — pings run without any DB kernel
+    // {
+    //     printf("\n\nPPNT ONLY BASELINE\n");
+    //     ppnt::TargetArgsT h_args{};
+    //     ppnt::TargetArgsT *d_args = nullptr;
+    //     gpuErrchk(hipMalloc(&d_args, sizeof(ppnt::TargetArgsT)));
+    //     gpuErrchk(hipMemcpy(d_args, &h_args, sizeof(ppnt::TargetArgsT), hipMemcpyHostToDevice));
+    //     ppnt::TargetFnT fn{};
+    //     size_t _n_plan = n_plan;
+    //     void *kargs[] = {(void *)&fn, (void *)&d_args, (void *)&d_plan,
+    //                      (void *)&_n_plan, (void *)&d_out};
+    //     gpuErrchk(hipLaunchCooperativeKernel(
+    //         (void *)ppnt::fused_kernel<ppnt::TargetFnT, ppnt::TargetArgsT>,
+    //         dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
+    //     gpuErrchk(hipStreamSynchronize(stream));
+    //     ppnt::parse_pingouts(d_plan, d_out, _n_plan, TARGET_BLOCKDIM_X, clock);
+    //     deferred_frees.push_back(d_args);
+    // }
 
-    auto run_vecscan = [&](const char *placement_name, int hbm, uint64_t *d_hot_chunk_ptrs) {
-        int active_queries = count_vecscan_queries_for_xcd(
-            Q, physical_grid_size, DB_VECSCAN_ACTIVE_XCD, 0);
-        printf("\n\nVECSCAN %s (XCD%d only, hot candidate lists in HBM%d)\n",
-               placement_name, DB_VECSCAN_ACTIVE_XCD, hbm);
-        printf("[DB] active VecScan queries on XCD%d: %d/%d\n",
-               DB_VECSCAN_ACTIVE_XCD, active_queries, Q);
-        uint64_t *d_blk_start = nullptr, *d_blk_end = nullptr;
-        int      *d_blk_nq    = nullptr;
-        gpuErrchk(hipMalloc(&d_blk_start, sizeof(uint64_t) * physical_grid_size));
-        gpuErrchk(hipMalloc(&d_blk_end,   sizeof(uint64_t) * physical_grid_size));
-        gpuErrchk(hipMalloc(&d_blk_nq,    sizeof(int)      * physical_grid_size));
-        gpuErrchk(hipMemset(d_blk_nq, 0,  sizeof(int)      * physical_grid_size));
-        uint64_t *d_q_lat = nullptr; uint32_t *d_q_bid = nullptr;
-        gpuErrchk(hipMalloc(&d_q_lat, sizeof(uint64_t) * Q));
-        gpuErrchk(hipMemset(d_q_lat, 0, sizeof(uint64_t) * Q));
-        gpuErrchk(hipMalloc(&d_q_bid, sizeof(uint32_t) * Q));
-        const int active_xcd_mask = (1 << DB_VECSCAN_ACTIVE_XCD);
-        VecScanArgs h_args = {d_hot_chunk_ptrs, d_cold_entries, d_query_vecs,
-                              d_candidate_ids, d_results, d_result_ids,
-                              Q, N_COLD, DB_CANDIDATES_PER_QUERY,
-                              d_blk_start, d_blk_end, d_blk_nq, d_q_lat, d_q_bid,
-                              active_xcd_mask};
-        VecScanArgs *d_args = nullptr;
-        gpuErrchk(hipMalloc(&d_args, sizeof(VecScanArgs)));
-        gpuErrchk(hipMemcpy(d_args, &h_args, sizeof(VecScanArgs), hipMemcpyHostToDevice));
-        VecScanTargetFn fn{};
-        size_t _n_plan = n_plan;
-        void *kargs[] = {(void *)&fn, (void *)&d_args, (void *)&d_plan,
-                         (void *)&_n_plan, (void *)&d_out};
-        size_t n_plan_solo = 0;
-        void *kargs_solo[] = {(void *)&fn, (void *)&d_args, (void *)&d_plan,
-                              (void *)&n_plan_solo, (void *)&d_out};
-        float solo_ms = launch_fused_and_time(
-            (void *)ppnt::fused_kernel<VecScanTargetFn, VecScanArgs>,
-            physical_grid_size, kargs_solo, stream);
-        gpuErrchk(hipMemsetAsync(d_blk_start, 0, sizeof(uint64_t) * physical_grid_size, stream));
-        gpuErrchk(hipMemsetAsync(d_blk_end,   0, sizeof(uint64_t) * physical_grid_size, stream));
-        gpuErrchk(hipMemsetAsync(d_blk_nq,    0, sizeof(int)      * physical_grid_size, stream));
-        gpuErrchk(hipMemsetAsync(d_q_lat,     0, sizeof(uint64_t) * Q, stream));
-        gpuErrchk(hipMemsetAsync(d_q_bid,     0, sizeof(uint32_t) * Q, stream));
-        float corun_ms = launch_fused_and_time(
-            (void *)ppnt::fused_kernel<VecScanTargetFn, VecScanArgs>,
-            physical_grid_size, kargs, stream);
-        char vecscan_tag[64];
-        snprintf(vecscan_tag, sizeof(vecscan_tag), "VECSCAN %s XCD%d@HBM%d",
-                 placement_name, DB_VECSCAN_ACTIVE_XCD, hbm);
-        log_tput_impact(vecscan_tag, (double)active_queries, "QPS",
-                        solo_ms, corun_ms, _n_plan);
-        ppnt::parse_pingouts(d_plan, d_out, _n_plan, TARGET_BLOCKDIM_X, clock);
-        parse_vecscan_qps(d_blk_start, d_blk_end, d_blk_nq,
-                          physical_grid_size, physical_grid_size / XCD_NUM, clock);
-        parse_query_tail_latency(d_q_lat, d_q_bid, Q, physical_grid_size / XCD_NUM, clock);
-        deferred_frees.push_back(d_blk_start);
-        deferred_frees.push_back(d_blk_end);
-        deferred_frees.push_back(d_blk_nq);
-        deferred_frees.push_back(d_q_lat);
-        deferred_frees.push_back(d_q_bid);
-        deferred_frees.push_back(d_args);
-    };
+    // auto run_vecscan = [&](const char *placement_name, int hbm, uint64_t *d_hot_chunk_ptrs) {
+    //     int active_queries = count_vecscan_queries_for_xcd(
+    //         Q, physical_grid_size, DB_VECSCAN_ACTIVE_XCD, 0);
+    //     printf("\n\nVECSCAN %s (XCD%d only, hot candidate lists in HBM%d)\n",
+    //            placement_name, DB_VECSCAN_ACTIVE_XCD, hbm);
+    //     printf("[DB] active VecScan queries on XCD%d: %d/%d\n",
+    //            DB_VECSCAN_ACTIVE_XCD, active_queries, Q);
+    //     uint64_t *d_blk_start = nullptr, *d_blk_end = nullptr;
+    //     int      *d_blk_nq    = nullptr;
+    //     gpuErrchk(hipMalloc(&d_blk_start, sizeof(uint64_t) * physical_grid_size));
+    //     gpuErrchk(hipMalloc(&d_blk_end,   sizeof(uint64_t) * physical_grid_size));
+    //     gpuErrchk(hipMalloc(&d_blk_nq,    sizeof(int)      * physical_grid_size));
+    //     gpuErrchk(hipMemset(d_blk_nq, 0,  sizeof(int)      * physical_grid_size));
+    //     uint64_t *d_q_lat = nullptr; uint32_t *d_q_bid = nullptr;
+    //     gpuErrchk(hipMalloc(&d_q_lat, sizeof(uint64_t) * Q));
+    //     gpuErrchk(hipMemset(d_q_lat, 0, sizeof(uint64_t) * Q));
+    //     gpuErrchk(hipMalloc(&d_q_bid, sizeof(uint32_t) * Q));
+    //     const int active_xcd_mask = (1 << DB_VECSCAN_ACTIVE_XCD);
+    //     VecScanArgs h_args = {d_hot_chunk_ptrs, d_cold_entries, d_query_vecs,
+    //                           d_candidate_ids, d_results, d_result_ids,
+    //                           Q, N_COLD, DB_CANDIDATES_PER_QUERY,
+    //                           d_blk_start, d_blk_end, d_blk_nq, d_q_lat, d_q_bid,
+    //                           active_xcd_mask};
+    //     VecScanArgs *d_args = nullptr;
+    //     gpuErrchk(hipMalloc(&d_args, sizeof(VecScanArgs)));
+    //     gpuErrchk(hipMemcpy(d_args, &h_args, sizeof(VecScanArgs), hipMemcpyHostToDevice));
+    //     VecScanTargetFn fn{};
+    //     size_t _n_plan = n_plan;
+    //     void *kargs[] = {(void *)&fn, (void *)&d_args, (void *)&d_plan,
+    //                      (void *)&_n_plan, (void *)&d_out};
+    //     size_t n_plan_solo = 0;
+    //     void *kargs_solo[] = {(void *)&fn, (void *)&d_args, (void *)&d_plan,
+    //                           (void *)&n_plan_solo, (void *)&d_out};
+    //     float solo_ms = launch_fused_and_time(
+    //         (void *)ppnt::fused_kernel<VecScanTargetFn, VecScanArgs>,
+    //         physical_grid_size, kargs_solo, stream);
+    //     gpuErrchk(hipMemsetAsync(d_blk_start, 0, sizeof(uint64_t) * physical_grid_size, stream));
+    //     gpuErrchk(hipMemsetAsync(d_blk_end,   0, sizeof(uint64_t) * physical_grid_size, stream));
+    //     gpuErrchk(hipMemsetAsync(d_blk_nq,    0, sizeof(int)      * physical_grid_size, stream));
+    //     gpuErrchk(hipMemsetAsync(d_q_lat,     0, sizeof(uint64_t) * Q, stream));
+    //     gpuErrchk(hipMemsetAsync(d_q_bid,     0, sizeof(uint32_t) * Q, stream));
+    //     float corun_ms = launch_fused_and_time(
+    //         (void *)ppnt::fused_kernel<VecScanTargetFn, VecScanArgs>,
+    //         physical_grid_size, kargs, stream);
+    //     char vecscan_tag[64];
+    //     snprintf(vecscan_tag, sizeof(vecscan_tag), "VECSCAN %s XCD%d@HBM%d",
+    //              placement_name, DB_VECSCAN_ACTIVE_XCD, hbm);
+    //     log_tput_impact(vecscan_tag, (double)active_queries, "QPS",
+    //                     solo_ms, corun_ms, _n_plan);
+    //     ppnt::parse_pingouts(d_plan, d_out, _n_plan, TARGET_BLOCKDIM_X, clock);
+    //     parse_vecscan_qps(d_blk_start, d_blk_end, d_blk_nq,
+    //                       physical_grid_size, physical_grid_size / XCD_NUM, clock);
+    //     parse_query_tail_latency(d_q_lat, d_q_bid, Q, physical_grid_size / XCD_NUM, clock);
+    //     deferred_frees.push_back(d_blk_start);
+    //     deferred_frees.push_back(d_blk_end);
+    //     deferred_frees.push_back(d_blk_nq);
+    //     deferred_frees.push_back(d_q_lat);
+    //     deferred_frees.push_back(d_q_bid);
+    //     deferred_frees.push_back(d_args);
+    // };
 
-    // 1. VecScan before migration.
-    run_vecscan("original", DB_VECSCAN_ORIGINAL_HBM, d_vecscan_original_chunk_ptrs);
+    // // 1. VecScan before migration.
+    // run_vecscan("original", DB_VECSCAN_ORIGINAL_HBM, d_vecscan_original_chunk_ptrs);
 
-    // 2. VecScan after emulated migration: same XCD and queries, migrated HBM.
-    run_vecscan("migrated", DB_VECSCAN_MIGRATED_HBM, d_vecscan_migrated_chunk_ptrs);
+    // // 2. VecScan after emulated migration: same XCD and queries, migrated HBM.
+    // run_vecscan("migrated", DB_VECSCAN_MIGRATED_HBM, d_vecscan_migrated_chunk_ptrs);
 
-    int priority_stop = 1;
-    gpuErrchk(hipMemcpyAsync(d_priority_stop, &priority_stop, sizeof(int),
-                             hipMemcpyHostToDevice, stream));
-    gpuErrchk(hipStreamSynchronize(stream));
-    gpuErrchk(hipStreamSynchronize(priority_stream));
+    // int priority_stop = 1;
+    // gpuErrchk(hipMemcpyAsync(d_priority_stop, &priority_stop, sizeof(int),
+    //                          hipMemcpyHostToDevice, stream));
+    // gpuErrchk(hipStreamSynchronize(stream));
+    // gpuErrchk(hipStreamSynchronize(priority_stream));
 
-    for (void *ptr : deferred_frees)
-        gpuErrchk(hipFree(ptr));
+    // for (void *ptr : deferred_frees)
+    //     gpuErrchk(hipFree(ptr));
 
-    unsigned long long priority_completed = 0;
-    unsigned long long priority_worker_slots = 0;
-    gpuErrchk(hipMemcpy(&priority_completed, d_priority_completed,
-                        sizeof(priority_completed), hipMemcpyDeviceToHost));
-    gpuErrchk(hipMemcpy(&priority_worker_slots, d_priority_worker_slots,
-                        sizeof(priority_worker_slots), hipMemcpyDeviceToHost));
+    // unsigned long long priority_completed = 0;
+    // unsigned long long priority_worker_slots = 0;
+    // gpuErrchk(hipMemcpy(&priority_completed, d_priority_completed,
+    //                     sizeof(priority_completed), hipMemcpyDeviceToHost));
+    // gpuErrchk(hipMemcpy(&priority_worker_slots, d_priority_worker_slots,
+    //                     sizeof(priority_worker_slots), hipMemcpyDeviceToHost));
 
-    const size_t priority_n_metrics =
-        (size_t)min<unsigned long long>(priority_completed, (unsigned long long)Q);
-    vector<uint64_t> priority_queue_latencies(priority_n_metrics);
-    vector<uint64_t> priority_service_latencies(priority_n_metrics);
-    if (priority_n_metrics > 0) {
-        gpuErrchk(hipMemcpy(priority_queue_latencies.data(), d_priority_queue_latencies,
-                            sizeof(uint64_t) * priority_n_metrics, hipMemcpyDeviceToHost));
-        gpuErrchk(hipMemcpy(priority_service_latencies.data(), d_priority_service_latencies,
-                            sizeof(uint64_t) * priority_n_metrics, hipMemcpyDeviceToHost));
+    // const size_t priority_n_metrics =
+    //     (size_t)min<unsigned long long>(priority_completed, (unsigned long long)Q);
+    // vector<uint64_t> priority_queue_latencies(priority_n_metrics);
+    // vector<uint64_t> priority_service_latencies(priority_n_metrics);
+    // if (priority_n_metrics > 0) {
+    //     gpuErrchk(hipMemcpy(priority_queue_latencies.data(), d_priority_queue_latencies,
+    //                         sizeof(uint64_t) * priority_n_metrics, hipMemcpyDeviceToHost));
+    //     gpuErrchk(hipMemcpy(priority_service_latencies.data(), d_priority_service_latencies,
+    //                         sizeof(uint64_t) * priority_n_metrics, hipMemcpyDeviceToHost));
 
-        MeasurementSeries queue_ns;
-        MeasurementSeries service_ns;
-        for (size_t i = 0; i < priority_n_metrics; i++) {
-            queue_ns.add(priority_queue_latencies[i] / (double)clock * 1e3);
-            service_ns.add(priority_service_latencies[i] / (double)clock * 1e3);
-        }
-        printf("[DB P] stopped: active_workers=%llu/%d completed=%llu "
-               "queue_p50=%.1f ns queue_p99=%.1f ns "
-               "service_p50=%.1f ns service_p99=%.1f ns\n",
-               min<unsigned long long>(priority_worker_slots, P_WORKERS), P_WORKERS,
-               priority_completed,
-               queue_ns.getPercentile(0.50), queue_ns.getPercentile(0.99),
-               service_ns.getPercentile(0.50), service_ns.getPercentile(0.99));
-    } else {
-        printf("[DB P] stopped: active_workers=%llu/%d completed=0\n",
-               min<unsigned long long>(priority_worker_slots, P_WORKERS), P_WORKERS);
-    }
+    //     MeasurementSeries queue_ns;
+    //     MeasurementSeries service_ns;
+    //     for (size_t i = 0; i < priority_n_metrics; i++) {
+    //         queue_ns.add(priority_queue_latencies[i] / (double)clock * 1e3);
+    //         service_ns.add(priority_service_latencies[i] / (double)clock * 1e3);
+    //     }
+    //     printf("[DB P] stopped: active_workers=%llu/%d completed=%llu "
+    //            "queue_p50=%.1f ns queue_p99=%.1f ns "
+    //            "service_p50=%.1f ns service_p99=%.1f ns\n",
+    //            min<unsigned long long>(priority_worker_slots, P_WORKERS), P_WORKERS,
+    //            priority_completed,
+    //            queue_ns.getPercentile(0.50), queue_ns.getPercentile(0.99),
+    //            service_ns.getPercentile(0.50), service_ns.getPercentile(0.99));
+    // } else {
+    //     printf("[DB P] stopped: active_workers=%llu/%d completed=0\n",
+    //            min<unsigned long long>(priority_worker_slots, P_WORKERS), P_WORKERS);
+    // }
 
-    gpuErrchk(hipFree(d_priority_args));
-    gpuErrchk(hipFree(d_priority_stop));
-    gpuErrchk(hipFree(d_priority_start));
-    gpuErrchk(hipFree(d_priority_next));
-    gpuErrchk(hipFree(d_priority_completed));
-    gpuErrchk(hipFree(d_priority_worker_slots));
-    gpuErrchk(hipFree(d_priority_queue_latencies));
-    gpuErrchk(hipFree(d_priority_service_latencies));
-    gpuErrchk(hipStreamDestroy(priority_stream));
+    // gpuErrchk(hipFree(d_priority_args));
+    // gpuErrchk(hipFree(d_priority_stop));
+    // gpuErrchk(hipFree(d_priority_start));
+    // gpuErrchk(hipFree(d_priority_next));
+    // gpuErrchk(hipFree(d_priority_completed));
+    // gpuErrchk(hipFree(d_priority_worker_slots));
+    // gpuErrchk(hipFree(d_priority_queue_latencies));
+    // gpuErrchk(hipFree(d_priority_service_latencies));
+    // gpuErrchk(hipStreamDestroy(priority_stream));
 
-    gpuErrchk(hipFree(d_query_vecs));
-    gpuErrchk(hipFree(d_cold_entries));
-    gpuErrchk(hipFree(d_results));
-    gpuErrchk(hipFree(d_priority_results));
-    gpuErrchk(hipFree(d_candidate_ids));
-    gpuErrchk(hipFree(d_result_ids));
-    gpuErrchk(hipFree(d_priority_result_ids));
-    gpuErrchk(hipFree(d_vecscan_original_chunk_ptrs));
-    gpuErrchk(hipFree(d_vecscan_migrated_chunk_ptrs));
-    gpuErrchk(hipFree(db_flat_data));
-    gpuErrchk(hipStreamDestroy(stream));
+    // gpuErrchk(hipFree(d_query_vecs));
+    // gpuErrchk(hipFree(d_cold_entries));
+    // gpuErrchk(hipFree(d_results));
+    // gpuErrchk(hipFree(d_priority_results));
+    // gpuErrchk(hipFree(d_candidate_ids));
+    // gpuErrchk(hipFree(d_result_ids));
+    // gpuErrchk(hipFree(d_priority_result_ids));
+    // gpuErrchk(hipFree(d_vecscan_original_chunk_ptrs));
+    // gpuErrchk(hipFree(d_vecscan_migrated_chunk_ptrs));
+    // gpuErrchk(hipFree(db_flat_data));
+    // gpuErrchk(hipStreamDestroy(stream));
     return 0;
 }
