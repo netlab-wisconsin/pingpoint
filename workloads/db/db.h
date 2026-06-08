@@ -94,6 +94,37 @@ namespace db_cg = cooperative_groups;
 // Separate DB-owned placement buffer for VecScan.
 #define DB_VECSCAN_DATA_SIZE (256 * 1024 * 1024)
 
+// Logging
+#ifndef DEBUG_DB
+#define DEBUG_DB 0
+#endif
+
+#ifndef P_WORKERS
+#define P_WORKERS 8
+#endif
+
+#ifndef P_ACTIVE_XCD
+#define P_ACTIVE_XCD 2
+#endif
+
+#ifndef P_ARRIVAL_QPS
+#define P_ARRIVAL_QPS 500000
+#endif
+
+#define P_BLOCKDIM_X DB_ENTRY_DIM
+
+#if P_WORKERS <= 0 || P_WORKERS >= CU_NUM
+#error "P_WORKERS must be in [1, CU_NUM) so later cooperative kernels can co-run"
+#endif
+
+#if P_ACTIVE_XCD < 0 || P_ACTIVE_XCD >= XCD_NUM
+#error "P_ACTIVE_XCD must be in [0, XCD_NUM)"
+#endif
+
+#if P_ARRIVAL_QPS <= 0
+#error "P_ARRIVAL_QPS must be positive"
+#endif
+
 static void db_fill_random(float *v, size_t n, float scale = 1.0f)
 {
     std::mt19937 rng(789);
@@ -163,7 +194,7 @@ static int home_identification(
     size_t data_size,
     size_t n_chunks,
     vector<uint32_t> &chunk_home_xcd,
-    vector<vector<uint64_t>> &chunks_per_hbm)
+    vector<vector<uint64_t>> &chunks_per_cc)
 {
     uint32_t *d_cycles = nullptr;
     gpuErrchk(hipMalloc(&d_cycles, sizeof(uint32_t) * XCD_NUM * n_chunks));
@@ -185,8 +216,9 @@ static int home_identification(
                             sizeof(uint32_t) * n_chunks, hipMemcpyDeviceToHost));
     }
 
+    const int xcd_per_cc = XCD_NUM / CC_NUM;
     chunk_home_xcd.assign(n_chunks, UINT32_MAX);
-    chunks_per_hbm.assign(HBM_NUM, vector<uint64_t>());
+    chunks_per_cc.assign(CC_NUM, vector<uint64_t>());
     for (size_t k = 0; k < n_chunks; k++) {
         uint32_t min_cycles = UINT32_MAX;
         int min_xcc = -1;
@@ -197,7 +229,7 @@ static int home_identification(
             }
         }
         chunk_home_xcd[k] = (uint32_t)min_xcc;
-        chunks_per_hbm[min_xcc].push_back(
+        chunks_per_cc[min_xcc / xcd_per_cc].push_back(
             reinterpret_cast<uint64_t>(d_data + k * CHUNK_SIZE));
     }
 
@@ -246,9 +278,14 @@ struct VecScanTargetFn {
                     int bid, int tid, int gridDimX, int blockDimX,
                     int n_ppnt_tbs_in_xcd) const
     {
-        int xcd_lane        = bid % XCD_NUM;
+        uint32_t xcd_lane;
+        asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=r"(xcd_lane));
+
         if (a->active_xcd_mask != 0 && !((a->active_xcd_mask >> xcd_lane) & 1))
             return;
+#if DEBUG_DB
+        printf("VecScanTargetFn: bid=%d tid=%d xcd_lane=%d\n", bid, tid, xcd_lane);
+#endif
 
         int n_tbs_in_xcd    = gridDimX / XCD_NUM;
         int logical_bid     = ppnt::physical_to_logical_bid(bid, n_tbs_in_xcd, n_ppnt_tbs_in_xcd);
@@ -261,6 +298,7 @@ struct VecScanTargetFn {
             a->block_start_clk[bid] = __builtin_readcyclecounter();
         int n_q = 0;
 
+        // Each block iterates over queries in a strided grid loop
         for (int q = logical_bid; q < a->Q; q += logical_grid_sz) {
             n_q++;
             // All threads read the start clock (no divergence); used by tid==0 below.
@@ -315,3 +353,138 @@ struct VecScanTargetFn {
         }
     }
 };
+
+// Persistent priority ANN engine. Request IDs are generated from a fixed-rate
+// time schedule, independent of completion rate, so congestion builds a queue.
+struct PriorityEngineArgs {
+    const uint64_t *__restrict__ hot_chunk_ptrs;
+    const float    *__restrict__ cold_entries;
+    const float    *__restrict__ query_vecs;
+    const int      *__restrict__ candidate_ids;
+    float          *__restrict__ results;
+    int            *__restrict__ result_ids;
+    int Q;
+    int N_COLD;
+    int n_candidates;
+    int priority_xcd;
+    int worker_limit;
+    uint64_t arrival_interval_cycles;
+    volatile int *__restrict__ stop;
+    unsigned long long *__restrict__ start_cycle;
+    unsigned long long *__restrict__ next_request;
+    unsigned long long *__restrict__ completed_requests;
+    unsigned long long *__restrict__ worker_slots_claimed;
+    uint64_t *__restrict__ queue_latencies;
+    uint64_t *__restrict__ service_latencies;
+    size_t metrics_capacity;
+};
+
+__global__ void priority_engine(PriorityEngineArgs *a)
+{
+    const int tid = threadIdx.x;
+    uint32_t xcd_id;
+    asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=r"(xcd_id));
+
+    if ((int)xcd_id != a->priority_xcd)
+        return;
+
+    __shared__ int active_worker;
+    __shared__ int should_stop;
+    __shared__ unsigned long long request_id;
+    __shared__ unsigned long long arrival_cycle;
+    __shared__ float reduction[P_BLOCKDIM_X];
+
+    if (tid == 0) {
+        unsigned long long slot = atomicAdd(a->worker_slots_claimed, 1ULL);
+        active_worker = slot < (unsigned long long)a->worker_limit;
+    }
+    __syncthreads();
+    if (!active_worker)
+        return;
+
+    if (tid == 0) {
+        unsigned long long now = __builtin_readcyclecounter();
+        unsigned long long proposed_start = now + 2 * a->arrival_interval_cycles;
+        atomicCAS(a->start_cycle, 0ULL, proposed_start);
+    }
+    __syncthreads();
+
+    while (true) {
+        if (tid == 0) {
+            should_stop = 0;
+            while (true) {
+                if (*a->stop) {
+                    should_stop = 1;
+                    break;
+                }
+
+                const unsigned long long now = __builtin_readcyclecounter();
+                const unsigned long long start = *a->start_cycle;
+                if (now < start)
+                    continue;
+
+                const unsigned long long arrived =
+                    1ULL + (now - start) / a->arrival_interval_cycles;
+                unsigned long long next = *a->next_request;
+                if (next >= arrived)
+                    continue;
+
+                if (atomicCAS(a->next_request, next, next + 1ULL) == next) {
+                    request_id = next;
+                    arrival_cycle = start + next * a->arrival_interval_cycles;
+                    break;
+                }
+            }
+        }
+        __syncthreads();
+        if (should_stop)
+            break;
+
+        const int q = (int)(request_id % (unsigned long long)a->Q);
+        const unsigned long long service_start = __builtin_readcyclecounter();
+        float best_score = -FLT_MAX;
+        int best_id = -1;
+
+        for (int ci = 0; ci < a->n_candidates; ci++) {
+            const int cand_id = a->candidate_ids[(size_t)q * a->n_candidates + ci];
+            const float *target;
+            if (cand_id < N_HOT_CHUNKS) {
+                target = reinterpret_cast<const float *>(a->hot_chunk_ptrs[cand_id]);
+            } else {
+                const int cold_id = cand_id - N_HOT_CHUNKS;
+                target = a->cold_entries + (size_t)(cold_id % a->N_COLD) * DB_ENTRY_DIM;
+            }
+
+            float partial = 0.0f;
+            for (int d = tid; d < DB_ENTRY_DIM; d += blockDim.x)
+                partial += a->query_vecs[(size_t)q * DB_ENTRY_DIM + d] * target[d];
+
+            reduction[tid] = partial;
+            __syncthreads();
+            for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+                if (tid < s)
+                    reduction[tid] += reduction[tid + s];
+                __syncthreads();
+            }
+            if (tid == 0 && reduction[0] > best_score) {
+                best_score = reduction[0];
+                best_id = cand_id;
+            }
+            __syncthreads();
+        }
+
+        if (tid == 0) {
+            const unsigned long long completion = __builtin_readcyclecounter();
+            a->results[q] = best_score;
+            if (a->result_ids)
+                a->result_ids[q] = best_id;
+            if (a->metrics_capacity > 0) {
+                const size_t slot = (size_t)(request_id % a->metrics_capacity);
+                a->queue_latencies[slot] = completion - arrival_cycle;
+                a->service_latencies[slot] = completion - service_start;
+            }
+            atomicAdd(a->completed_requests, 1ULL);
+        }
+        __syncthreads();
+    }
+}
