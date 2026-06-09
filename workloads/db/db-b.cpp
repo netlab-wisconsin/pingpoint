@@ -645,15 +645,15 @@ int main(int argc, char **argv) {
     gpuErrchk(hipStreamCreate(&stream));
 
     // Leave enough device-wide cooperative capacity for the persistent P engine.
-    int physical_grid_size;
-    {
-        const int max_target_phys = (CU_NUM - P_WORKERS) * XCD_NUM;
-        const int requested_phys = (argc > 2) ? atoi(argv[2]) : max_target_phys;
-        const int target_phys = min(max(requested_phys, XCD_NUM), max_target_phys);
-        physical_grid_size = (target_phys / XCD_NUM) * XCD_NUM;
-        printf("[DB] Cooperative Grid: %d physical blocks; %d CUs/XCD reserved for P\n",
-               physical_grid_size, P_WORKERS);
-    }
+    // int physical_grid_size;
+    // {
+    //     const int max_target_phys = (CU_NUM - P_WORKERS) * XCD_NUM;
+    //     const int requested_phys = (argc > 2) ? atoi(argv[2]) : max_target_phys;
+    //     const int target_phys = min(max(requested_phys, XCD_NUM), max_target_phys);
+    //     physical_grid_size = (target_phys / XCD_NUM) * XCD_NUM;
+    //     printf("[DB] Cooperative Grid: %d physical blocks; %d CUs/XCD reserved for P\n",
+    //            physical_grid_size, P_WORKERS);
+    // }
 
     // =========================================================================
     // DB SETUP
@@ -667,24 +667,24 @@ int main(int argc, char **argv) {
     gpuErrchk(hipMalloc(&db_flat_data, db_flat_size));
 
     vector<uint32_t> db_chunk_home_xcd;
-    vector<vector<uint64_t>> db_chunks_per_cc;
+    vector<vector<uint64_t>> p_chunks_per_cc;
     if (db::home_identification(db_flat_data, db_flat_size,
                                 (size_t)N_DB_ENTRIES, db_chunk_home_xcd,
-                                db_chunks_per_cc) == -1)
+                                p_chunks_per_cc) == -1)
         return -1;
 
 #if DEBUG_DB && (DEBUG_LEVEL >= 1)
     for (int v = 0; v < CC_NUM; v++) {
-        size_t bytes = db_chunks_per_cc[v].size() * CHUNK_SIZE;
+        size_t bytes = p_chunks_per_cc[v].size() * CHUNK_SIZE;
         size_t LLC_SIZE_PER_CC = LLC_SIZE / CC_NUM;
         string level = bytes > L2_SIZE ? (bytes > LLC_SIZE_PER_CC ? "hbm" : "llc") : "l2";
-        cout << "[DB] pinned data: cc" << v << " "
-             << db_chunks_per_cc[v].size() << " entries "
+        cout << "[DB P] pinned data: cc" << v << " "
+             << p_chunks_per_cc[v].size() << " entries "
              << bytes / (1024 * 1024) << "MB at " << level << "\n" << flush;
     }
 #endif
 
-    const vector<uint64_t> &priority_chunks = db_chunks_per_cc[P_TARGET_CC];
+    const vector<uint64_t> &priority_chunks = p_chunks_per_cc[P_TARGET_CC];
     if (priority_chunks.empty()) {
         fprintf(stderr, "[DB P] target CC%d has no classified embedding chunks\n",
                 P_TARGET_CC);
@@ -714,6 +714,17 @@ int main(int argc, char **argv) {
                                 (size_t)N_DB_ENTRIES, be_chunk_home_xcd,
                                 be_chunks_per_cc) == -1)
         return -1;
+
+#if DEBUG_DB && (DEBUG_LEVEL >= 1)
+    for (int v = 0; v < CC_NUM; v++) {
+        size_t bytes = be_chunks_per_cc[v].size() * CHUNK_SIZE;
+        size_t LLC_SIZE_PER_CC = LLC_SIZE / CC_NUM;
+        string level = bytes > L2_SIZE ? (bytes > LLC_SIZE_PER_CC ? "hbm" : "llc") : "l2";
+        cout << "[DB BE] pinned data: cc" << v << " "
+             << be_chunks_per_cc[v].size() << " entries "
+             << bytes / (1024 * 1024) << "MB at " << level << "\n" << flush;
+    }
+#endif
 
     const vector<uint64_t> &be_chunks = be_chunks_per_cc[P_TARGET_CC];
     if (be_chunks.empty()) {
@@ -753,19 +764,7 @@ int main(int argc, char **argv) {
     gpuErrchk(hipExtStreamCreateWithCUMask(
         &priority_stream, priority_cu_mask_size, priority_cu_mask.data()));
 #if DEBUG_DB && (DEBUG_LEVEL >= 1)
-    printf("[DB P] active CUs per XCD:\n");
-    for (int xcd = 0; xcd < XCD_NUM; xcd++) {
-        printf("  XCD%d:", xcd);
-        if (xcd != P_ACTIVE_XCD) {
-            printf(" none\n");
-            continue;
-        }
-        for (int cu = 0; cu < CU_NUM; cu++) {
-            if ((priority_cu_bits >> cu) & 1ULL)
-                printf(" CU%d", cu);
-        }
-        printf("\n");
-    }
+    printf("[DB P] active CUs on XCD %d: %d\n", P_ACTIVE_XCD, P_WORKERS);
 #endif
 
     PriorityEngineArgs *d_priority_args = nullptr;
@@ -837,6 +836,14 @@ int main(int argc, char **argv) {
            BE_WORKERS_PER_XCD);
     gpuErrchk(hipExtStreamCreateWithCUMask(
         &be_stream, be_cu_mask_size, be_cu_mask.data()));
+#if DEBUG_DB && (DEBUG_LEVEL >= 1)
+    printf("[DB BE] active CUs on XCDs");
+    for (int xcd = 0; xcd < XCD_NUM; xcd++) {
+        if (be_active_xcd_mask & (1u << xcd))
+            printf(" %d", xcd);
+    }
+    printf(": %d/XCD\n", BE_WORKERS_PER_XCD);
+#endif
 
     BestEffortEngineArgs *d_be_args = nullptr;
     int *d_be_stop = nullptr;
@@ -862,7 +869,7 @@ int main(int argc, char **argv) {
     gpuErrchk(hipMemcpy(d_be_args, &h_be_args, sizeof(BestEffortEngineArgs),
                         hipMemcpyHostToDevice));
 
-    printf("[DB B][unmanaged] BE: target=CC%d chunks=%zu (%zu/XCD partition) "
+    printf("[DB BE][unmanaged] target=CC%d chunks=%zu (%zu/XCD partition) "
            "workers=%d/XCD active_xcd_mask=0x%02x\n",
            P_TARGET_CC, be_chunks.size(), be_chunks.size() / XCD_NUM,
            BE_WORKERS_PER_XCD,
@@ -911,13 +918,13 @@ int main(int argc, char **argv) {
                             sizeof(unsigned long long) * XCD_NUM));
     };
 
-    printf("[DB B][unmanaged] P+BE warm-up for %d seconds\n",
+    printf("[DB P+BE][unmanaged] warm-up for %d seconds\n",
            priority_warmup_seconds);
     this_thread::sleep_for(chrono::seconds(priority_warmup_seconds));
     stop_unmanaged_engines();
     reset_unmanaged_engines();
 
-    printf("[DB B][unmanaged] measuring P+BE for %d seconds\n",
+    printf("[DB P+BE][unmanaged] measuring for %d seconds\n",
            priority_measure_seconds);
     hipLaunchKernelGGL(priority_engine,
                        dim3(P_WORKERS * XCD_NUM), dim3(P_BLOCKDIM_X),
@@ -948,7 +955,7 @@ int main(int argc, char **argv) {
         priority_offered_requests > priority_completed
             ? priority_offered_requests - priority_completed
             : 0;
-    printf("[DB B][unmanaged][P] duration=%.3f s offered=%d QPS achieved=%.0f QPS "
+    printf("[DB P][unmanaged] duration=%.3f s offered=%d QPS achieved=%.0f QPS "
            "completion=%.2f%% completed=%llu backlog_est=%llu workers=%llu/%d\n",
            priority_measure_s, P_ARRIVAL_QPS, priority_achieved_qps,
            100.0 * priority_achieved_qps / (double)P_ARRIVAL_QPS,
@@ -983,7 +990,7 @@ int main(int argc, char **argv) {
         }
 
         auto print_priority_latency = [](const char *name, MeasurementSeries &series) {
-            printf("[DB B][unmanaged][P] %-8s samples=%d p50=%.1f ns p95=%.1f ns "
+            printf("[DB P][unmanaged] %-8s samples=%d p50=%.1f ns p95=%.1f ns "
                    "p99=%.1f ns p99.9=%.1f ns\n",
                    name, series.count(), series.getPercentile(0.50),
                    series.getPercentile(0.95), series.getPercentile(0.99),
@@ -1008,14 +1015,14 @@ int main(int argc, char **argv) {
         if (!(be_active_xcd_mask & (1u << xcd)))
             continue;
         be_completed_total += be_completed_per_xcd[xcd];
-        printf("[DB B][unmanaged][BE] XCD%d workers=%llu/%d achieved=%.0f QPS\n",
+        printf("[DB BE][unmanaged] XCD%d workers=%llu/%d achieved=%.0f QPS\n",
                xcd,
                min<unsigned long long>(be_worker_slots_per_xcd[xcd],
                                        BE_WORKERS_PER_XCD),
                BE_WORKERS_PER_XCD,
                be_completed_per_xcd[xcd] / priority_measure_s);
     }
-    printf("[DB B][unmanaged][BE] aggregate=%.0f QPS completed=%llu\n",
+    printf("[DB BE][unmanaged] aggregate=%.0f QPS completed=%llu\n",
            be_completed_total / priority_measure_s, be_completed_total);
 
     gpuErrchk(hipFree(d_priority_args));
