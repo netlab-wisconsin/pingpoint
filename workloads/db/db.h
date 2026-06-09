@@ -119,6 +119,10 @@ namespace db_cg = cooperative_groups;
 #define BE_WORKERS_PER_XCD 8
 #endif
 
+#ifndef BE_BATCH_CHUNKS
+#define BE_BATCH_CHUNKS 64
+#endif
+
 #define P_BLOCKDIM_X DB_ENTRY_DIM
 #define BE_BLOCKDIM_X DB_ENTRY_DIM
 
@@ -128,6 +132,10 @@ namespace db_cg = cooperative_groups;
 
 #if BE_WORKERS_PER_XCD <= 0 || BE_WORKERS_PER_XCD > CU_NUM
 #error "BE_WORKERS_PER_XCD must be in [1, CU_NUM]"
+#endif
+
+#if BE_BATCH_CHUNKS < 4 || (BE_BATCH_CHUNKS % 4) != 0
+#error "BE_BATCH_CHUNKS must be a positive multiple of 4"
 #endif
 
 #if P_ACTIVE_XCD < 0 || P_ACTIVE_XCD >= XCD_NUM
@@ -484,8 +492,10 @@ __global__ void priority_engine(PriorityEngineArgs *a)
     }
 }
 
-// Closed-loop best-effort embedding scan. Each enabled XCD owns an independent
-// fixed-width worker pool that continuously scans the supplied chunk list.
+// Closed-loop best-effort embedding scan. Every enabled XCD sweeps the complete
+// chunk list, while workers within an XCD process disjoint batches. Each worker
+// issues a batch of independent chunk loads before one reduction and counter
+// update to make BE bandwidth-intensive.
 struct BestEffortEngineArgs {
     const uint64_t *__restrict__ chunk_ptrs;
     float          *__restrict__ worker_sinks;
@@ -493,7 +503,7 @@ struct BestEffortEngineArgs {
     int worker_limit_per_xcd;
     uint32_t active_xcd_mask;
     volatile int *__restrict__ stop;
-    unsigned long long *__restrict__ completed_requests_per_xcd;
+    unsigned long long *__restrict__ completed_chunks_per_xcd;
     unsigned long long *__restrict__ worker_slots_claimed_per_xcd;
 };
 
@@ -530,18 +540,42 @@ __global__ void best_effort_engine(BestEffortEngineArgs *a)
         if (should_stop)
             break;
 
-        const size_t chunks_per_xcd = a->n_chunks / XCD_NUM;
-        const size_t chunk_index =
-            (size_t)xcd_id * chunks_per_xcd +
-            (size_t)((iteration *
-                          (unsigned long long)a->worker_limit_per_xcd +
-                      (unsigned long long)worker_slot) %
-                     (unsigned long long)chunks_per_xcd);
-        const float *target =
-            reinterpret_cast<const float *>(a->chunk_ptrs[chunk_index]);
-        float partial = 0.0f;
-        for (int d = tid; d < DB_ENTRY_DIM; d += blockDim.x)
-            partial += target[d];
+        const unsigned long long batch_id =
+            iteration * (unsigned long long)a->worker_limit_per_xcd +
+            (unsigned long long)worker_slot;
+        const size_t xcd_phase =
+            (size_t)xcd_id * (a->n_chunks / (size_t)XCD_NUM);
+        const size_t batch_base =
+            (xcd_phase +
+             (size_t)((batch_id * (unsigned long long)BE_BATCH_CHUNKS) %
+                      (unsigned long long)a->n_chunks)) %
+            a->n_chunks;
+
+        float accum0 = 0.0f;
+        float accum1 = 0.0f;
+        float accum2 = 0.0f;
+        float accum3 = 0.0f;
+        for (int chunk = 0; chunk < BE_BATCH_CHUNKS; chunk += 4) {
+            const size_t index0 = (batch_base + (size_t)chunk + 0) % a->n_chunks;
+            const size_t index1 = (batch_base + (size_t)chunk + 1) % a->n_chunks;
+            const size_t index2 = (batch_base + (size_t)chunk + 2) % a->n_chunks;
+            const size_t index3 = (batch_base + (size_t)chunk + 3) % a->n_chunks;
+            const float *target0 =
+                reinterpret_cast<const float *>(a->chunk_ptrs[index0]);
+            const float *target1 =
+                reinterpret_cast<const float *>(a->chunk_ptrs[index1]);
+            const float *target2 =
+                reinterpret_cast<const float *>(a->chunk_ptrs[index2]);
+            const float *target3 =
+                reinterpret_cast<const float *>(a->chunk_ptrs[index3]);
+            for (int d = tid; d < DB_ENTRY_DIM; d += blockDim.x) {
+                accum0 += target0[d];
+                accum1 += target1[d];
+                accum2 += target2[d];
+                accum3 += target3[d];
+            }
+        }
+        const float partial = accum0 + accum1 + accum2 + accum3;
 
         reduction[tid] = partial;
         __syncthreads();
@@ -555,7 +589,8 @@ __global__ void best_effort_engine(BestEffortEngineArgs *a)
             const size_t sink_index =
                 (size_t)xcd_id * a->worker_limit_per_xcd + worker_slot;
             a->worker_sinks[sink_index] = reduction[0];
-            atomicAdd(&a->completed_requests_per_xcd[xcd_id], 1ULL);
+            atomicAdd(&a->completed_chunks_per_xcd[xcd_id],
+                      (unsigned long long)BE_BATCH_CHUNKS);
             iteration++;
         }
         __syncthreads();
