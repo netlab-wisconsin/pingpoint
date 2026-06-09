@@ -1,0 +1,9 @@
+Policies:
+(a) Priority alone. ideal upper bound
+(b) Unmanaged co-location
+(c) Random BE migration
+(d) Locality-only migration
+(e) Stop all BE engines
+(f) PingPoint-guided selective stopping 
+(g) PingPoint-guided selective migration
+(h) Oracle placement using the ground-truth interference matrix.

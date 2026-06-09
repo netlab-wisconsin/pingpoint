@@ -363,8 +363,8 @@ static void build_synthetic_ann_dataset(
 int main(int argc, char **argv) {
 
     // @june: gpu clock set to 2100 as mi3008x node reports incorrect clock values
-    // unsigned int clock = 2100;
-    unsigned int clock = getGPUClock();
+    unsigned int clock = 2100;
+    // unsigned int clock = getGPUClock();
 
     // =========================================================================
     // K1 SETUP  (pointer-chase latency data, one chain per HBM)

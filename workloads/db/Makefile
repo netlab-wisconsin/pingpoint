@@ -15,24 +15,30 @@ DB_LIST_SIZE := 64
 DB_CANDIDATES_PER_QUERY := 1
 P_WORKERS := 8
 P_ACTIVE_XCD := 2
-P_TARGET_CC := 0 # 0, 1, 3, 4
+# Valid values: 0, 1, 2, 3
+P_TARGET_CC := 0
 P_ARRIVAL_QPS := 500000
+BE_WORKERS_PER_XCD := 8
 
 DEBUG_DB := 0
 DEBUG_LEVEL := 0
 
-DB_ALL_TARGET := $(BIN_DIR)/db_${P_ACTIVE_XCD}_${P_TARGET_CC}_${P_WORKERS}_${P_ARRIVAL_QPS}
-# DB_BE_TARGET  := $(BIN_DIR)/db_be
+DB_A_TARGET := $(BIN_DIR)/db-a_${P_ACTIVE_XCD}_${P_TARGET_CC}_${P_WORKERS}_${P_ARRIVAL_QPS}
+DB_B_TARGET := $(BIN_DIR)/db-b_${P_ACTIVE_XCD}_${P_TARGET_CC}_${P_WORKERS}_${P_ARRIVAL_QPS}_be$(BE_WORKERS_PER_XCD)
 
-.PHONY: all clean
+.PHONY: all policy-a policy-b clean
 
-all: $(DB_ALL_TARGET) $(DB_BE_TARGET)
+all: $(DB_A_TARGET) $(DB_B_TARGET)
+
+policy-a: $(DB_A_TARGET)
+
+policy-b: $(DB_B_TARGET)
 
 $(BIN_DIR):
 	mkdir -p $@
 
-$(DB_ALL_TARGET): db.cpp db.h \
-                  ppnt.h main.h k1.h k2.h | $(BIN_DIR)
+$(DB_A_TARGET): db-a.cpp db.h \
+                ppnt.h main.h k1.h k2.h | $(BIN_DIR)
 	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) \
 	-DDB_LIST_SIZE=$(DB_LIST_SIZE) \
 	-DDB_CANDIDATES_PER_QUERY=$(DB_CANDIDATES_PER_QUERY) \
@@ -44,18 +50,19 @@ $(DB_ALL_TARGET): db.cpp db.h \
 	-DDEBUG_LEVEL=$(DEBUG_LEVEL) \
 	-o $@ $<
 
-# $(DB_BE_TARGET): db_be.cpp db.h \
-#                  ppnt.h main.h k1.h k2.h | $(BIN_DIR)
-# 	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) \
-# 	-DDB_LIST_SIZE=$(DB_LIST_SIZE) \
-# 	-DDB_CANDIDATES_PER_QUERY=$(DB_CANDIDATES_PER_QUERY) \
-# 	-DP_WORKERS=$(P_WORKERS) \
-# 	-DP_ACTIVE_XCD=$(P_ACTIVE_XCD) \
-# 	-DP_TARGET_CC=$(P_TARGET_CC) \
-# 	-DP_ARRIVAL_QPS=$(P_ARRIVAL_QPS) \
-# 	-DDEBUG_DB=$(DEBUG_DB) \
-# 	-DDEBUG_LEVEL=$(DEBUG_LEVEL) \
-# 	-o $@ $<
+$(DB_B_TARGET): db-b.cpp db.h \
+                ppnt.h main.h k1.h k2.h | $(BIN_DIR)
+	$(CC) $(OPTS) $(CCFLAGS) $(INCLUDES) $(LDFLAGS) \
+	-DDB_LIST_SIZE=$(DB_LIST_SIZE) \
+	-DDB_CANDIDATES_PER_QUERY=$(DB_CANDIDATES_PER_QUERY) \
+	-DP_WORKERS=$(P_WORKERS) \
+	-DP_ACTIVE_XCD=$(P_ACTIVE_XCD) \
+	-DP_TARGET_CC=$(P_TARGET_CC) \
+	-DP_ARRIVAL_QPS=$(P_ARRIVAL_QPS) \
+	-DBE_WORKERS_PER_XCD=$(BE_WORKERS_PER_XCD) \
+	-DDEBUG_DB=$(DEBUG_DB) \
+	-DDEBUG_LEVEL=$(DEBUG_LEVEL) \
+	-o $@ $<
 
 clean:
-	rm -f $(DB_ALL_TARGET) $(DB_BE_TARGET)
+	rm -f $(DB_A_TARGET) $(DB_B_TARGET)

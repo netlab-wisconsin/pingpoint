@@ -115,10 +115,19 @@ namespace db_cg = cooperative_groups;
 #define P_ARRIVAL_QPS 500000
 #endif
 
+#ifndef BE_WORKERS_PER_XCD
+#define BE_WORKERS_PER_XCD 8
+#endif
+
 #define P_BLOCKDIM_X DB_ENTRY_DIM
+#define BE_BLOCKDIM_X DB_ENTRY_DIM
 
 #if P_WORKERS <= 0 || P_WORKERS >= CU_NUM
 #error "P_WORKERS must be in [1, CU_NUM) so later cooperative kernels can co-run"
+#endif
+
+#if BE_WORKERS_PER_XCD <= 0 || BE_WORKERS_PER_XCD > CU_NUM
+#error "BE_WORKERS_PER_XCD must be in [1, CU_NUM]"
 #endif
 
 #if P_ACTIVE_XCD < 0 || P_ACTIVE_XCD >= XCD_NUM
@@ -470,6 +479,84 @@ __global__ void priority_engine(PriorityEngineArgs *a)
                 a->service_latencies[slot] = completion - service_start;
             }
             atomicAdd(a->completed_requests, 1ULL);
+        }
+        __syncthreads();
+    }
+}
+
+// Closed-loop best-effort embedding scan. Each enabled XCD owns an independent
+// fixed-width worker pool that continuously scans the supplied chunk list.
+struct BestEffortEngineArgs {
+    const uint64_t *__restrict__ chunk_ptrs;
+    float          *__restrict__ worker_sinks;
+    size_t n_chunks;
+    int worker_limit_per_xcd;
+    uint32_t active_xcd_mask;
+    volatile int *__restrict__ stop;
+    unsigned long long *__restrict__ completed_requests_per_xcd;
+    unsigned long long *__restrict__ worker_slots_claimed_per_xcd;
+};
+
+__global__ void best_effort_engine(BestEffortEngineArgs *a)
+{
+    const int tid = threadIdx.x;
+    uint32_t xcd_id;
+    asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=r"(xcd_id));
+
+    if (xcd_id >= XCD_NUM || !(a->active_xcd_mask & (1u << xcd_id)))
+        return;
+
+    __shared__ int worker_slot;
+    __shared__ int active_worker;
+    __shared__ int should_stop;
+    __shared__ unsigned long long iteration;
+    __shared__ float reduction[BE_BLOCKDIM_X];
+
+    if (tid == 0) {
+        const unsigned long long slot =
+            atomicAdd(&a->worker_slots_claimed_per_xcd[xcd_id], 1ULL);
+        worker_slot = (int)slot;
+        active_worker = slot < (unsigned long long)a->worker_limit_per_xcd;
+        iteration = 0;
+    }
+    __syncthreads();
+    if (!active_worker)
+        return;
+
+    while (true) {
+        if (tid == 0)
+            should_stop = *a->stop;
+        __syncthreads();
+        if (should_stop)
+            break;
+
+        const size_t chunks_per_xcd = a->n_chunks / XCD_NUM;
+        const size_t chunk_index =
+            (size_t)xcd_id * chunks_per_xcd +
+            (size_t)((iteration *
+                          (unsigned long long)a->worker_limit_per_xcd +
+                      (unsigned long long)worker_slot) %
+                     (unsigned long long)chunks_per_xcd);
+        const float *target =
+            reinterpret_cast<const float *>(a->chunk_ptrs[chunk_index]);
+        float partial = 0.0f;
+        for (int d = tid; d < DB_ENTRY_DIM; d += blockDim.x)
+            partial += target[d];
+
+        reduction[tid] = partial;
+        __syncthreads();
+        for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+            if (tid < s)
+                reduction[tid] += reduction[tid + s];
+            __syncthreads();
+        }
+
+        if (tid == 0) {
+            const size_t sink_index =
+                (size_t)xcd_id * a->worker_limit_per_xcd + worker_slot;
+            a->worker_sinks[sink_index] = reduction[0];
+            atomicAdd(&a->completed_requests_per_xcd[xcd_id], 1ULL);
+            iteration++;
         }
         __syncthreads();
     }
