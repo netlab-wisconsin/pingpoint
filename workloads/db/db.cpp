@@ -9,6 +9,8 @@
 #include <iomanip>
 #include <algorithm>
 #include <cinttypes>
+#include <chrono>
+#include <thread>
 
 #include "../../mem_bench/gpu-clock.cuh"
 #include "../../mem_bench/MeasurementSeries.hpp"
@@ -731,15 +733,14 @@ int main(int argc, char **argv) {
 #endif
 
     PriorityEngineArgs *d_priority_args = nullptr;
+    int *d_priority_stop = nullptr;
+    unsigned long long *d_priority_start = nullptr;
+    unsigned long long *d_priority_next = nullptr;
+    unsigned long long *d_priority_completed = nullptr;
+    unsigned long long *d_priority_worker_slots = nullptr;
+    uint64_t *d_priority_queue_latencies = nullptr;
+    uint64_t *d_priority_service_latencies = nullptr;
     {
-        int *d_priority_stop = nullptr;
-        unsigned long long *d_priority_start = nullptr;
-        unsigned long long *d_priority_next = nullptr;
-        unsigned long long *d_priority_completed = nullptr;
-        unsigned long long *d_priority_worker_slots = nullptr;
-        uint64_t *d_priority_queue_latencies = nullptr;
-        uint64_t *d_priority_service_latencies = nullptr;
-
         gpuErrchk(hipMalloc(&d_priority_stop, sizeof(int)));
         gpuErrchk(hipMalloc(&d_priority_start, sizeof(unsigned long long)));
         gpuErrchk(hipMalloc(&d_priority_next, sizeof(unsigned long long)));
@@ -793,6 +794,122 @@ int main(int argc, char **argv) {
                        dim3(P_WORKERS * XCD_NUM), dim3(P_BLOCKDIM_X),
                        0, priority_stream, d_priority_args);
     gpuErrchk(hipGetLastError());
+
+    // Policy (a): Priority alone. Warm up once, then reset and collect an
+    // uncontaminated fixed-duration measurement from a second launch.
+    constexpr int priority_warmup_seconds = 2;
+    constexpr int priority_measure_seconds = 10;
+
+    auto stop_priority_engine = [&]() {
+        int priority_stop = 1;
+        gpuErrchk(hipMemcpyAsync(d_priority_stop, &priority_stop, sizeof(priority_stop),
+                                hipMemcpyHostToDevice, stream));
+        gpuErrchk(hipStreamSynchronize(stream));
+        gpuErrchk(hipStreamSynchronize(priority_stream));
+    };
+
+    auto reset_priority_engine = [&]() {
+        gpuErrchk(hipMemset(d_priority_stop, 0, sizeof(int)));
+        gpuErrchk(hipMemset(d_priority_start, 0, sizeof(unsigned long long)));
+        gpuErrchk(hipMemset(d_priority_next, 0, sizeof(unsigned long long)));
+        gpuErrchk(hipMemset(d_priority_completed, 0, sizeof(unsigned long long)));
+        gpuErrchk(hipMemset(d_priority_worker_slots, 0, sizeof(unsigned long long)));
+        gpuErrchk(hipMemset(d_priority_queue_latencies, 0,
+                            sizeof(uint64_t) * priority_metrics_capacity));
+        gpuErrchk(hipMemset(d_priority_service_latencies, 0,
+                            sizeof(uint64_t) * priority_metrics_capacity));
+    };
+
+    printf("[DB P][alone] warm-up for %d seconds\n", priority_warmup_seconds);
+    this_thread::sleep_for(chrono::seconds(priority_warmup_seconds));
+    stop_priority_engine();
+    reset_priority_engine();
+
+    printf("[DB P][alone] measuring for %d seconds\n", priority_measure_seconds);
+    hipLaunchKernelGGL(priority_engine,
+                       dim3(P_WORKERS * XCD_NUM), dim3(P_BLOCKDIM_X),
+                       0, priority_stream, d_priority_args);
+    gpuErrchk(hipGetLastError());
+    const auto priority_measure_begin = chrono::steady_clock::now();
+    this_thread::sleep_for(chrono::seconds(priority_measure_seconds));
+    const auto priority_measure_end = chrono::steady_clock::now();
+    stop_priority_engine();
+
+    unsigned long long priority_completed = 0;
+    unsigned long long priority_worker_slots = 0;
+    gpuErrchk(hipMemcpy(&priority_completed, d_priority_completed,
+                        sizeof(priority_completed), hipMemcpyDeviceToHost));
+    gpuErrchk(hipMemcpy(&priority_worker_slots, d_priority_worker_slots,
+                        sizeof(priority_worker_slots), hipMemcpyDeviceToHost));
+
+    const double priority_measure_s =
+        chrono::duration<double>(priority_measure_end - priority_measure_begin).count();
+    const double priority_achieved_qps = priority_completed / priority_measure_s;
+    const unsigned long long priority_offered_requests =
+        (unsigned long long)(priority_measure_s * (double)P_ARRIVAL_QPS);
+    const unsigned long long priority_backlog =
+        priority_offered_requests > priority_completed
+            ? priority_offered_requests - priority_completed
+            : 0;
+    printf("[DB P][alone] duration=%.3f s offered=%d QPS achieved=%.0f QPS "
+           "completion=%.2f%% completed=%llu backlog_est=%llu workers=%llu/%d\n",
+           priority_measure_s, P_ARRIVAL_QPS, priority_achieved_qps,
+           100.0 * priority_achieved_qps / (double)P_ARRIVAL_QPS,
+           priority_completed, priority_backlog,
+           min<unsigned long long>(priority_worker_slots, P_WORKERS), P_WORKERS);
+
+    const size_t priority_n_metrics =
+        (size_t)min<unsigned long long>(priority_completed, priority_metrics_capacity);
+    vector<uint64_t> priority_response_cycles(priority_n_metrics);
+    vector<uint64_t> priority_service_cycles(priority_n_metrics);
+    if (priority_n_metrics > 0) {
+        gpuErrchk(hipMemcpy(priority_response_cycles.data(), d_priority_queue_latencies,
+                            sizeof(uint64_t) * priority_n_metrics,
+                            hipMemcpyDeviceToHost));
+        gpuErrchk(hipMemcpy(priority_service_cycles.data(), d_priority_service_latencies,
+                            sizeof(uint64_t) * priority_n_metrics,
+                            hipMemcpyDeviceToHost));
+
+        MeasurementSeries response_ns;
+        MeasurementSeries queue_ns;
+        MeasurementSeries service_ns;
+        for (size_t i = 0; i < priority_n_metrics; i++) {
+            if (priority_response_cycles[i] == 0 || priority_service_cycles[i] == 0)
+                continue;
+            response_ns.add(priority_response_cycles[i] / (double)clock * 1e3);
+            service_ns.add(priority_service_cycles[i] / (double)clock * 1e3);
+            const uint64_t queue_cycles =
+                priority_response_cycles[i] > priority_service_cycles[i]
+                    ? priority_response_cycles[i] - priority_service_cycles[i]
+                    : 0;
+            queue_ns.add(queue_cycles / (double)clock * 1e3);
+        }
+
+        auto print_priority_latency = [](const char *name, MeasurementSeries &series) {
+            printf("[DB P][alone] %-8s samples=%d p50=%.1f ns p95=%.1f ns "
+                   "p99=%.1f ns p99.9=%.1f ns\n",
+                   name, series.count(), series.getPercentile(0.50),
+                   series.getPercentile(0.95), series.getPercentile(0.99),
+                   series.getPercentile(0.999));
+        };
+        print_priority_latency("response", response_ns);
+        print_priority_latency("queue", queue_ns);
+        print_priority_latency("service", service_ns);
+    }
+
+    gpuErrchk(hipFree(d_priority_args));
+    gpuErrchk(hipFree(d_priority_stop));
+    gpuErrchk(hipFree(d_priority_start));
+    gpuErrchk(hipFree(d_priority_next));
+    gpuErrchk(hipFree(d_priority_completed));
+    gpuErrchk(hipFree(d_priority_worker_slots));
+    gpuErrchk(hipFree(d_priority_queue_latencies));
+    gpuErrchk(hipFree(d_priority_service_latencies));
+    gpuErrchk(hipFree(d_priority_worker_sinks));
+    gpuErrchk(hipFree(d_priority_chunk_ptrs));
+    gpuErrchk(hipFree(db_flat_data));
+    gpuErrchk(hipStreamDestroy(priority_stream));
+    gpuErrchk(hipStreamDestroy(stream));
 
     // // =========================================================================
     // // PPNT EXECUTION WITH DB KERNELS
@@ -883,60 +1000,6 @@ int main(int argc, char **argv) {
 
     // // 2. VecScan after emulated migration: same XCD and queries, migrated HBM.
     // run_vecscan("migrated", DB_VECSCAN_MIGRATED_HBM, d_vecscan_migrated_chunk_ptrs);
-
-    // int priority_stop = 1;
-    // gpuErrchk(hipMemcpyAsync(d_priority_stop, &priority_stop, sizeof(int),
-    //                          hipMemcpyHostToDevice, stream));
-    // gpuErrchk(hipStreamSynchronize(stream));
-    // gpuErrchk(hipStreamSynchronize(priority_stream));
-
-    // for (void *ptr : deferred_frees)
-    //     gpuErrchk(hipFree(ptr));
-
-    // unsigned long long priority_completed = 0;
-    // unsigned long long priority_worker_slots = 0;
-    // gpuErrchk(hipMemcpy(&priority_completed, d_priority_completed,
-    //                     sizeof(priority_completed), hipMemcpyDeviceToHost));
-    // gpuErrchk(hipMemcpy(&priority_worker_slots, d_priority_worker_slots,
-    //                     sizeof(priority_worker_slots), hipMemcpyDeviceToHost));
-
-    // const size_t priority_n_metrics =
-    //     (size_t)min<unsigned long long>(priority_completed, (unsigned long long)Q);
-    // vector<uint64_t> priority_queue_latencies(priority_n_metrics);
-    // vector<uint64_t> priority_service_latencies(priority_n_metrics);
-    // if (priority_n_metrics > 0) {
-    //     gpuErrchk(hipMemcpy(priority_queue_latencies.data(), d_priority_queue_latencies,
-    //                         sizeof(uint64_t) * priority_n_metrics, hipMemcpyDeviceToHost));
-    //     gpuErrchk(hipMemcpy(priority_service_latencies.data(), d_priority_service_latencies,
-    //                         sizeof(uint64_t) * priority_n_metrics, hipMemcpyDeviceToHost));
-
-    //     MeasurementSeries queue_ns;
-    //     MeasurementSeries service_ns;
-    //     for (size_t i = 0; i < priority_n_metrics; i++) {
-    //         queue_ns.add(priority_queue_latencies[i] / (double)clock * 1e3);
-    //         service_ns.add(priority_service_latencies[i] / (double)clock * 1e3);
-    //     }
-    //     printf("[DB P] stopped: active_workers=%llu/%d completed=%llu "
-    //            "queue_p50=%.1f ns queue_p99=%.1f ns "
-    //            "service_p50=%.1f ns service_p99=%.1f ns\n",
-    //            min<unsigned long long>(priority_worker_slots, P_WORKERS), P_WORKERS,
-    //            priority_completed,
-    //            queue_ns.getPercentile(0.50), queue_ns.getPercentile(0.99),
-    //            service_ns.getPercentile(0.50), service_ns.getPercentile(0.99));
-    // } else {
-    //     printf("[DB P] stopped: active_workers=%llu/%d completed=0\n",
-    //            min<unsigned long long>(priority_worker_slots, P_WORKERS), P_WORKERS);
-    // }
-
-    // gpuErrchk(hipFree(d_priority_args));
-    // gpuErrchk(hipFree(d_priority_stop));
-    // gpuErrchk(hipFree(d_priority_start));
-    // gpuErrchk(hipFree(d_priority_next));
-    // gpuErrchk(hipFree(d_priority_completed));
-    // gpuErrchk(hipFree(d_priority_worker_slots));
-    // gpuErrchk(hipFree(d_priority_queue_latencies));
-    // gpuErrchk(hipFree(d_priority_service_latencies));
-    // gpuErrchk(hipStreamDestroy(priority_stream));
 
     // gpuErrchk(hipFree(d_query_vecs));
     // gpuErrchk(hipFree(d_cold_entries));

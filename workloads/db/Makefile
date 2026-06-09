@@ -11,18 +11,18 @@ INCLUDES := -I$(HIP_HOME)/include/rocprofiler/ \
             -I$(HIP_HOME)/hsa/include/hsa
 LDFLAGS  := -L$(HIP_HOME)/lib/rocprofiler -lrocprofiler64 -lhsa-runtime64 -lrocm_smi64 -ldl
 
-DB_ALL_TARGET := $(BIN_DIR)/db_all
-DB_BE_TARGET  := $(BIN_DIR)/db_be
-
 DB_LIST_SIZE := 64
 DB_CANDIDATES_PER_QUERY := 1
 P_WORKERS := 8
 P_ACTIVE_XCD := 2
-P_TARGET_CC := 2
+P_TARGET_CC := 0 # 0, 1, 3, 4
 P_ARRIVAL_QPS := 500000
 
 DEBUG_DB := 0
 DEBUG_LEVEL := 0
+
+DB_ALL_TARGET := $(BIN_DIR)/db_${P_ACTIVE_XCD}_${P_TARGET_CC}_${P_WORKERS}_${P_ARRIVAL_QPS}
+# DB_BE_TARGET  := $(BIN_DIR)/db_be
 
 .PHONY: all clean
 

@@ -10,6 +10,7 @@ using namespace std;
 #define XCD_NUM 8
 #define HBM_NUM 8
 #define CC_NUM  4 
+#define XCD_PER_CC (XCD_NUM / CC_NUM)
 #define CU_NUM  36
 
 #define L2_SIZE (4 * 1024 * 1024) // 4 MB
