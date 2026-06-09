@@ -728,6 +728,8 @@ int main(int argc, char **argv) {
     unsigned long long *d_priority_worker_slots = nullptr;
     uint64_t *d_priority_queue_latencies = nullptr;
     uint64_t *d_priority_service_latencies = nullptr;
+    unsigned long long *d_priority_load_cycle_sums = nullptr;
+    unsigned long long *d_priority_load_counts = nullptr;
     {
         gpuErrchk(hipMalloc(&d_priority_stop, sizeof(int)));
         gpuErrchk(hipMalloc(&d_priority_start, sizeof(unsigned long long)));
@@ -738,6 +740,10 @@ int main(int argc, char **argv) {
                             sizeof(uint64_t) * priority_metrics_capacity));
         gpuErrchk(hipMalloc(&d_priority_service_latencies,
                             sizeof(uint64_t) * priority_metrics_capacity));
+        gpuErrchk(hipMalloc(&d_priority_load_cycle_sums,
+                            sizeof(unsigned long long) * P_WORKERS * P_BLOCKDIM_X));
+        gpuErrchk(hipMalloc(&d_priority_load_counts,
+                            sizeof(unsigned long long) * P_WORKERS * P_BLOCKDIM_X));
         gpuErrchk(hipMemset(d_priority_stop, 0, sizeof(int)));
         gpuErrchk(hipMemset(d_priority_start, 0, sizeof(unsigned long long)));
         gpuErrchk(hipMemset(d_priority_next, 0, sizeof(unsigned long long)));
@@ -747,6 +753,10 @@ int main(int argc, char **argv) {
                             sizeof(uint64_t) * priority_metrics_capacity));
         gpuErrchk(hipMemset(d_priority_service_latencies, 0,
                             sizeof(uint64_t) * priority_metrics_capacity));
+        gpuErrchk(hipMemset(d_priority_load_cycle_sums, 0,
+                            sizeof(unsigned long long) * P_WORKERS * P_BLOCKDIM_X));
+        gpuErrchk(hipMemset(d_priority_load_counts, 0,
+                            sizeof(unsigned long long) * P_WORKERS * P_BLOCKDIM_X));
         
         // P_ARRIVAL_QPS sets the desired open-loop request arrival rate.
         // priority_arrival_interval_cycles converts that rate into GPU clock cycles
@@ -759,7 +769,8 @@ int main(int argc, char **argv) {
             P_ACTIVE_XCD, P_WORKERS, priority_arrival_interval_cycles,
             d_priority_stop, d_priority_start, d_priority_next, d_priority_completed,
             d_priority_worker_slots, d_priority_queue_latencies,
-            d_priority_service_latencies, priority_metrics_capacity
+            d_priority_service_latencies, priority_metrics_capacity,
+            d_priority_load_cycle_sums, d_priority_load_counts
         };
 
         gpuErrchk(hipMalloc(&d_priority_args, sizeof(PriorityEngineArgs)));
@@ -785,8 +796,10 @@ int main(int argc, char **argv) {
 
     // Policy (a): Priority alone. Warm up once, then reset and collect an
     // uncontaminated fixed-duration measurement from a second launch.
-    constexpr int priority_warmup_seconds = 2;
-    constexpr int priority_measure_seconds = 10;
+    // constexpr int priority_warmup_seconds = 2;
+    // constexpr int priority_measure_seconds = 10;
+    constexpr int priority_warmup_seconds = 0;
+    constexpr int priority_measure_seconds = 1;
 
     auto stop_priority_engine = [&]() {
         int priority_stop = 1;
@@ -806,6 +819,10 @@ int main(int argc, char **argv) {
                             sizeof(uint64_t) * priority_metrics_capacity));
         gpuErrchk(hipMemset(d_priority_service_latencies, 0,
                             sizeof(uint64_t) * priority_metrics_capacity));
+        gpuErrchk(hipMemset(d_priority_load_cycle_sums, 0,
+                            sizeof(unsigned long long) * P_WORKERS * P_BLOCKDIM_X));
+        gpuErrchk(hipMemset(d_priority_load_counts, 0,
+                            sizeof(unsigned long long) * P_WORKERS * P_BLOCKDIM_X));
     };
 
     printf("[DB P][alone] warm-up for %d seconds\n", priority_warmup_seconds);
@@ -829,6 +846,28 @@ int main(int argc, char **argv) {
                         sizeof(priority_completed), hipMemcpyDeviceToHost));
     gpuErrchk(hipMemcpy(&priority_worker_slots, d_priority_worker_slots,
                         sizeof(priority_worker_slots), hipMemcpyDeviceToHost));
+
+    vector<unsigned long long> priority_load_cycle_sums(
+        (size_t)P_WORKERS * P_BLOCKDIM_X);
+    vector<unsigned long long> priority_load_counts(
+        (size_t)P_WORKERS * P_BLOCKDIM_X);
+    gpuErrchk(hipMemcpy(priority_load_cycle_sums.data(), d_priority_load_cycle_sums,
+                        sizeof(unsigned long long) * priority_load_cycle_sums.size(),
+                        hipMemcpyDeviceToHost));
+    gpuErrchk(hipMemcpy(priority_load_counts.data(), d_priority_load_counts,
+                        sizeof(unsigned long long) * priority_load_counts.size(),
+                        hipMemcpyDeviceToHost));
+    unsigned long long priority_load_cycles_total = 0;
+    unsigned long long priority_load_count_total = 0;
+    for (size_t i = 0; i < priority_load_cycle_sums.size(); i++) {
+        priority_load_cycles_total += priority_load_cycle_sums[i];
+        priority_load_count_total += priority_load_counts[i];
+    }
+    printf("[DB P][alone] load_latency samples=%llu average=%.2f cycles\n",
+           priority_load_count_total,
+           priority_load_count_total > 0
+               ? (double)priority_load_cycles_total / priority_load_count_total
+               : 0.0);
 
     const double priority_measure_s =
         chrono::duration<double>(priority_measure_end - priority_measure_begin).count();
@@ -893,6 +932,8 @@ int main(int argc, char **argv) {
     gpuErrchk(hipFree(d_priority_worker_slots));
     gpuErrchk(hipFree(d_priority_queue_latencies));
     gpuErrchk(hipFree(d_priority_service_latencies));
+    gpuErrchk(hipFree(d_priority_load_cycle_sums));
+    gpuErrchk(hipFree(d_priority_load_counts));
     gpuErrchk(hipFree(d_priority_worker_sinks));
     gpuErrchk(hipFree(d_priority_chunk_ptrs));
     gpuErrchk(hipFree(db_flat_data));

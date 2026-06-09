@@ -123,6 +123,18 @@ namespace db_cg = cooperative_groups;
 #define BE_BATCH_CHUNKS 64
 #endif
 
+#ifndef P_MEASURE_LOAD_LATENCY
+#define P_MEASURE_LOAD_LATENCY 0
+#endif
+
+#ifndef BE_MEASURE_LOAD_LATENCY
+#define BE_MEASURE_LOAD_LATENCY 0
+#endif
+
+#ifndef DB_USE_GLOBAL_BARRIER
+#define DB_USE_GLOBAL_BARRIER 0
+#endif
+
 #define P_BLOCKDIM_X DB_ENTRY_DIM
 #define BE_BLOCKDIM_X DB_ENTRY_DIM
 
@@ -136,6 +148,18 @@ namespace db_cg = cooperative_groups;
 
 #if BE_BATCH_CHUNKS < 4 || (BE_BATCH_CHUNKS % 4) != 0
 #error "BE_BATCH_CHUNKS must be a positive multiple of 4"
+#endif
+
+#if P_MEASURE_LOAD_LATENCY != 0 && P_MEASURE_LOAD_LATENCY != 1
+#error "P_MEASURE_LOAD_LATENCY must be 0 or 1"
+#endif
+
+#if BE_MEASURE_LOAD_LATENCY != 0 && BE_MEASURE_LOAD_LATENCY != 1
+#error "BE_MEASURE_LOAD_LATENCY must be 0 or 1"
+#endif
+
+#if DB_USE_GLOBAL_BARRIER != 0 && DB_USE_GLOBAL_BARRIER != 1
+#error "DB_USE_GLOBAL_BARRIER must be 0 or 1"
 #endif
 
 #if P_ACTIVE_XCD < 0 || P_ACTIVE_XCD >= XCD_NUM
@@ -159,6 +183,29 @@ static void db_fill_random(float *v, size_t n, float scale = 1.0f)
 
 namespace db {
 
+__device__ int d_home_barrier_count = 0;
+__device__ int d_home_barrier_sense = 0;
+
+__device__ __forceinline__
+void home_global_barrier()
+{
+    __shared__ int local_sense;
+    if (threadIdx.x == 0) {
+        const int old_sense = d_home_barrier_sense;
+        local_sense = !old_sense;
+
+        const int arrived = atomicAdd(&d_home_barrier_count, 1);
+        if (arrived == gridDim.x - 1) {
+            d_home_barrier_count = 0;
+            __threadfence();
+            d_home_barrier_sense = local_sense;
+        }
+    }
+    __syncthreads();
+    while (d_home_barrier_sense != local_sense) {}
+    __syncthreads();
+}
+
 __global__ void identify_home(void *data, size_t size, uint32_t *d_cycles, int n_chunks)
 {
     int bid = blockIdx.x;
@@ -170,7 +217,9 @@ __global__ void identify_home(void *data, size_t size, uint32_t *d_cycles, int n
     assert(n_tbs_in_xcd == 1);
     assert(blockDim.x == 128);
 
+#if !DB_USE_GLOBAL_BARRIER
     db_cg::grid_group grid = db_cg::this_grid();
+#endif
     uint32_t xcc_id;
     asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=r"(xcc_id));
 
@@ -192,7 +241,11 @@ __global__ void identify_home(void *data, size_t size, uint32_t *d_cycles, int n
                 : "memory", "v0", "v1", "v2", "v3"
             );
         }
+#if DB_USE_GLOBAL_BARRIER
+        home_global_barrier();
+#else
         grid.sync();
+#endif
 
         for (size_t j = 0; j < n_inner; j++) {
             size_t index = (i * n_inner + j) * blockDim.x + tid;
@@ -209,7 +262,11 @@ __global__ void identify_home(void *data, size_t size, uint32_t *d_cycles, int n
                 size_t chunk = (i * n_inner + j) * n_tbs_in_xcd + tbid_in_xcd;
                 d_cycles[(size_t)xcc_id * n_chunks + chunk] = end - start;
             }
+#if DB_USE_GLOBAL_BARRIER
+            home_global_barrier();
+#else
             grid.sync();
+#endif
         }
     }
 }
@@ -231,8 +288,13 @@ static int home_identification(
         (void *)&d_cycles,
         (void *)&n_chunks_i
     };
+#if DB_USE_GLOBAL_BARRIER
+    gpuErrchk(hipLaunchKernel(
+        (void *)identify_home, dim3(XCD_NUM), dim3(128), kernel_args, 0, 0));
+#else
     gpuErrchk(hipLaunchCooperativeKernel(
         (void *)identify_home, dim3(XCD_NUM), dim3(128), kernel_args, 0, 0));
+#endif
     gpuErrchk(hipDeviceSynchronize());
 
     vector<vector<uint32_t>> h_cycles(XCD_NUM, vector<uint32_t>(n_chunks));
@@ -396,6 +458,8 @@ struct PriorityEngineArgs {
     uint64_t *__restrict__ queue_latencies;
     uint64_t *__restrict__ service_latencies;
     size_t metrics_capacity;
+    unsigned long long *__restrict__ load_cycle_sums;
+    unsigned long long *__restrict__ load_counts;
 };
 
 __global__ void priority_engine(PriorityEngineArgs *a)
@@ -413,6 +477,8 @@ __global__ void priority_engine(PriorityEngineArgs *a)
     __shared__ unsigned long long request_id;
     __shared__ unsigned long long arrival_cycle;
     __shared__ float reduction[P_BLOCKDIM_X];
+    unsigned long long thread_load_cycle_sum = 0;
+    unsigned long long thread_load_count = 0;
 
     if (tid == 0) {
         unsigned long long slot = atomicAdd(a->worker_slots_claimed, 1ULL);
@@ -467,8 +533,19 @@ __global__ void priority_engine(PriorityEngineArgs *a)
             reinterpret_cast<const float *>(a->chunk_ptrs[chunk_index]);
         const unsigned long long service_start = __builtin_readcyclecounter();
         float partial = 0.0f;
-        for (int d = tid; d < DB_ENTRY_DIM; d += blockDim.x)
+        for (int d = tid; d < DB_ENTRY_DIM; d += blockDim.x) {
+#if P_MEASURE_LOAD_LATENCY
+            const unsigned long long load_start = __builtin_readcyclecounter();
+            const float value = target[d];
+            asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+            const unsigned long long load_end = __builtin_readcyclecounter();
+            thread_load_cycle_sum += load_end - load_start;
+            thread_load_count++;
+            partial += value;
+#else
             partial += target[d];
+#endif
+        }
 
         reduction[tid] = partial;
         __syncthreads();
@@ -490,6 +567,12 @@ __global__ void priority_engine(PriorityEngineArgs *a)
         }
         __syncthreads();
     }
+
+#if P_MEASURE_LOAD_LATENCY
+    const size_t load_slot = (size_t)worker_slot * blockDim.x + tid;
+    a->load_cycle_sums[load_slot] = thread_load_cycle_sum;
+    a->load_counts[load_slot] = thread_load_count;
+#endif
 }
 
 // Closed-loop best-effort embedding scan. Every enabled XCD sweeps the complete
@@ -505,6 +588,8 @@ struct BestEffortEngineArgs {
     volatile int *__restrict__ stop;
     unsigned long long *__restrict__ completed_chunks_per_xcd;
     unsigned long long *__restrict__ worker_slots_claimed_per_xcd;
+    unsigned long long *__restrict__ load_cycle_sums;
+    unsigned long long *__restrict__ load_counts;
 };
 
 __global__ void best_effort_engine(BestEffortEngineArgs *a)
@@ -521,6 +606,8 @@ __global__ void best_effort_engine(BestEffortEngineArgs *a)
     __shared__ int should_stop;
     __shared__ unsigned long long iteration;
     __shared__ float reduction[BE_BLOCKDIM_X];
+    unsigned long long thread_load_cycle_sum = 0;
+    unsigned long long thread_load_count = 0;
 
     if (tid == 0) {
         const unsigned long long slot =
@@ -569,10 +656,42 @@ __global__ void best_effort_engine(BestEffortEngineArgs *a)
             const float *target3 =
                 reinterpret_cast<const float *>(a->chunk_ptrs[index3]);
             for (int d = tid; d < DB_ENTRY_DIM; d += blockDim.x) {
+#if BE_MEASURE_LOAD_LATENCY
+                unsigned long long load_start = __builtin_readcyclecounter();
+                const float value0 = target0[d];
+                asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+                unsigned long long load_end = __builtin_readcyclecounter();
+                thread_load_cycle_sum += load_end - load_start;
+
+                load_start = __builtin_readcyclecounter();
+                const float value1 = target1[d];
+                asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+                load_end = __builtin_readcyclecounter();
+                thread_load_cycle_sum += load_end - load_start;
+
+                load_start = __builtin_readcyclecounter();
+                const float value2 = target2[d];
+                asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+                load_end = __builtin_readcyclecounter();
+                thread_load_cycle_sum += load_end - load_start;
+
+                load_start = __builtin_readcyclecounter();
+                const float value3 = target3[d];
+                asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+                load_end = __builtin_readcyclecounter();
+                thread_load_cycle_sum += load_end - load_start;
+                thread_load_count += 4;
+
+                accum0 += value0;
+                accum1 += value1;
+                accum2 += value2;
+                accum3 += value3;
+#else
                 accum0 += target0[d];
                 accum1 += target1[d];
                 accum2 += target2[d];
                 accum3 += target3[d];
+#endif
             }
         }
         const float partial = accum0 + accum1 + accum2 + accum3;
@@ -595,4 +714,11 @@ __global__ void best_effort_engine(BestEffortEngineArgs *a)
         }
         __syncthreads();
     }
+
+#if BE_MEASURE_LOAD_LATENCY
+    const size_t load_slot =
+        ((size_t)xcd_id * a->worker_limit_per_xcd + worker_slot) * blockDim.x + tid;
+    a->load_cycle_sums[load_slot] = thread_load_cycle_sum;
+    a->load_counts[load_slot] = thread_load_count;
+#endif
 }
