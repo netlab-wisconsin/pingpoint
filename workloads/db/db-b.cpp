@@ -732,9 +732,9 @@ int main(int argc, char **argv) {
                 P_TARGET_CC);
         return 1;
     }
-    if (be_chunks.size() / XCD_NUM < BE_WORKERS_PER_XCD) {
+    if (be_chunks.size() < (size_t)BE_WORKERS_PER_XCD * BE_BATCH_CHUNKS) {
         fprintf(stderr,
-                "[DB BE] target CC%d has too few chunks for disjoint XCD partitions\n",
+                "[DB BE] target CC%d has too few chunks for disjoint worker batches\n",
                 P_TARGET_CC);
         return 1;
     }
@@ -847,15 +847,15 @@ int main(int argc, char **argv) {
 
     BestEffortEngineArgs *d_be_args = nullptr;
     int *d_be_stop = nullptr;
-    unsigned long long *d_be_completed_per_xcd = nullptr;
+    unsigned long long *d_be_completed_chunks_per_xcd = nullptr;
     unsigned long long *d_be_worker_slots_per_xcd = nullptr;
     gpuErrchk(hipMalloc(&d_be_stop, sizeof(int)));
-    gpuErrchk(hipMalloc(&d_be_completed_per_xcd,
+    gpuErrchk(hipMalloc(&d_be_completed_chunks_per_xcd,
                         sizeof(unsigned long long) * XCD_NUM));
     gpuErrchk(hipMalloc(&d_be_worker_slots_per_xcd,
                         sizeof(unsigned long long) * XCD_NUM));
     gpuErrchk(hipMemset(d_be_stop, 0, sizeof(int)));
-    gpuErrchk(hipMemset(d_be_completed_per_xcd, 0,
+    gpuErrchk(hipMemset(d_be_completed_chunks_per_xcd, 0,
                         sizeof(unsigned long long) * XCD_NUM));
     gpuErrchk(hipMemset(d_be_worker_slots_per_xcd, 0,
                         sizeof(unsigned long long) * XCD_NUM));
@@ -863,16 +863,15 @@ int main(int argc, char **argv) {
     BestEffortEngineArgs h_be_args = {
         d_be_chunk_ptrs, d_be_worker_sinks, be_chunks.size(),
         BE_WORKERS_PER_XCD, be_active_xcd_mask, d_be_stop,
-        d_be_completed_per_xcd, d_be_worker_slots_per_xcd
+        d_be_completed_chunks_per_xcd, d_be_worker_slots_per_xcd
     };
     gpuErrchk(hipMalloc(&d_be_args, sizeof(BestEffortEngineArgs)));
     gpuErrchk(hipMemcpy(d_be_args, &h_be_args, sizeof(BestEffortEngineArgs),
                         hipMemcpyHostToDevice));
 
-    printf("[DB BE][unmanaged] target=CC%d chunks=%zu (%zu/XCD partition) "
-           "workers=%d/XCD active_xcd_mask=0x%02x\n",
-           P_TARGET_CC, be_chunks.size(), be_chunks.size() / XCD_NUM,
-           BE_WORKERS_PER_XCD,
+    printf("[DB BE][unmanaged] target=CC%d chunks=%zu (full set/XCD) "
+           "workers=%d/XCD batch=%d chunks active_xcd_mask=0x%02x\n",
+           P_TARGET_CC, be_chunks.size(), BE_WORKERS_PER_XCD, BE_BATCH_CHUNKS,
            be_active_xcd_mask);
 
     // Launch P and BE together for the unmanaged co-location warm-up.
@@ -912,7 +911,7 @@ int main(int argc, char **argv) {
         gpuErrchk(hipMemset(d_priority_service_latencies, 0,
                             sizeof(uint64_t) * priority_metrics_capacity));
         gpuErrchk(hipMemset(d_be_stop, 0, sizeof(int)));
-        gpuErrchk(hipMemset(d_be_completed_per_xcd, 0,
+        gpuErrchk(hipMemset(d_be_completed_chunks_per_xcd, 0,
                             sizeof(unsigned long long) * XCD_NUM));
         gpuErrchk(hipMemset(d_be_worker_slots_per_xcd, 0,
                             sizeof(unsigned long long) * XCD_NUM));
@@ -1001,9 +1000,10 @@ int main(int argc, char **argv) {
         print_priority_latency("service", service_ns);
     }
 
-    vector<unsigned long long> be_completed_per_xcd(XCD_NUM);
+    vector<unsigned long long> be_completed_chunks_per_xcd(XCD_NUM);
     vector<unsigned long long> be_worker_slots_per_xcd(XCD_NUM);
-    gpuErrchk(hipMemcpy(be_completed_per_xcd.data(), d_be_completed_per_xcd,
+    gpuErrchk(hipMemcpy(be_completed_chunks_per_xcd.data(),
+                        d_be_completed_chunks_per_xcd,
                         sizeof(unsigned long long) * XCD_NUM,
                         hipMemcpyDeviceToHost));
     gpuErrchk(hipMemcpy(be_worker_slots_per_xcd.data(),
@@ -1014,16 +1014,21 @@ int main(int argc, char **argv) {
     for (int xcd = 0; xcd < XCD_NUM; xcd++) {
         if (!(be_active_xcd_mask & (1u << xcd)))
             continue;
-        be_completed_total += be_completed_per_xcd[xcd];
-        printf("[DB BE][unmanaged] XCD%d workers=%llu/%d achieved=%.0f QPS\n",
+        be_completed_total += be_completed_chunks_per_xcd[xcd];
+        const double be_scan_qps =
+            be_completed_chunks_per_xcd[xcd] / priority_measure_s;
+        printf("[DB BE][unmanaged] XCD%d workers=%llu/%d "
+               "scan_qps=%.0f effective=%.1f GB/s\n",
                xcd,
                min<unsigned long long>(be_worker_slots_per_xcd[xcd],
                                        BE_WORKERS_PER_XCD),
                BE_WORKERS_PER_XCD,
-               be_completed_per_xcd[xcd] / priority_measure_s);
+               be_scan_qps, be_scan_qps * CHUNK_SIZE / 1e9);
     }
-    printf("[DB BE][unmanaged] aggregate=%.0f QPS completed=%llu\n",
-           be_completed_total / priority_measure_s, be_completed_total);
+    const double be_scan_qps = be_completed_total / priority_measure_s;
+    printf("[DB BE][unmanaged] aggregate_scan_qps=%.0f effective=%.1f GB/s "
+           "completed_chunks=%llu\n",
+           be_scan_qps, be_scan_qps * CHUNK_SIZE / 1e9, be_completed_total);
 
     gpuErrchk(hipFree(d_priority_args));
     gpuErrchk(hipFree(d_priority_stop));
@@ -1037,7 +1042,7 @@ int main(int argc, char **argv) {
     gpuErrchk(hipFree(d_priority_chunk_ptrs));
     gpuErrchk(hipFree(d_be_args));
     gpuErrchk(hipFree(d_be_stop));
-    gpuErrchk(hipFree(d_be_completed_per_xcd));
+    gpuErrchk(hipFree(d_be_completed_chunks_per_xcd));
     gpuErrchk(hipFree(d_be_worker_slots_per_xcd));
     gpuErrchk(hipFree(d_be_worker_sinks));
     gpuErrchk(hipFree(d_be_chunk_ptrs));
