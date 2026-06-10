@@ -1,11 +1,11 @@
 #!/bin/bash
 
-RESULT_DIR="${WORK}/ici-workspace/sigcomm-exp/revision/db/policy-a" # change
-mkdir -p "${RESULT_DIR}"
-
 P_ACTIVE_XCD=2
 P_TARGET_CC=0
 P_WORKERS=4
+
+RESULT_DIR="${WORK}/ici-workspace/sigcomm-exp/revision/db/raw/policy-a" # change
+mkdir -p "${RESULT_DIR}"
 
 # 0.8M -> 1.6M in 25K steps (33 points), covering the solo knee (~1.43M)
 # and the corun knee (~1.0M-1.1M with BE_WORKERS_PER_XCD=32).

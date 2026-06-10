@@ -135,6 +135,34 @@ namespace db_cg = cooperative_groups;
 #define BE_HASHED_BATCHES 1
 #endif
 
+// BE target-CC policy:
+// 0: all BE batches target P_TARGET_CC (policy b, unmanaged co-location)
+// 1: each batch targets a random CC (policy c, random migration)
+// 2: each batch targets a uniform random non-P CC (policy e, guided migration)
+#ifndef BE_TARGET_POLICY
+#define BE_TARGET_POLICY 0
+#endif
+
+// Policy c bias: probability (0-100) that a random batch lands on P's CC;
+// the remainder is uniform over the other CCs. 25 = uniform over 4 CCs,
+// 100 = equivalent to policy b.
+#ifndef BE_RANDOM_CC0_PCT
+#define BE_RANDOM_CC0_PCT 25
+#endif
+
+// Policy d: random BE throttling. Percentage (0-100) of batches each worker
+// skips, idling for BE_THROTTLE_IDLE_CYCLES instead (so skipped batches cost
+// the time a real batch would have, removing work rather than moving it).
+#ifndef BE_THROTTLE_PCT
+#define BE_THROTTLE_PCT 0
+#endif
+
+// Idle duration of a throttled batch; default ~ the time one 64-chunk batch
+// takes at HBM-bound BE rates (~9us at 2.1GHz).
+#ifndef BE_THROTTLE_IDLE_CYCLES
+#define BE_THROTTLE_IDLE_CYCLES 18000
+#endif
+
 #ifndef P_MEASURE_LOAD_LATENCY
 #define P_MEASURE_LOAD_LATENCY 0
 #endif
@@ -168,6 +196,26 @@ static_assert(BE_BLOCKDIM_X == DB_ENTRY_DIM && DB_ENTRY_DIM % 4 == 0,
 
 #if BE_HASHED_BATCHES != 0 && BE_HASHED_BATCHES != 1
 #error "BE_HASHED_BATCHES must be 0 or 1"
+#endif
+
+#if BE_TARGET_POLICY < 0 || BE_TARGET_POLICY > 2
+#error "BE_TARGET_POLICY must be 0, 1, or 2"
+#endif
+
+#if BE_TARGET_POLICY != 0 && !BE_HASHED_BATCHES
+#error "BE_TARGET_POLICY=1/2 (random/guided CC) requires BE_HASHED_BATCHES=1"
+#endif
+
+#if BE_RANDOM_CC0_PCT < 0 || BE_RANDOM_CC0_PCT > 100
+#error "BE_RANDOM_CC0_PCT must be in [0, 100]"
+#endif
+
+#if BE_THROTTLE_PCT < 0 || BE_THROTTLE_PCT > 100
+#error "BE_THROTTLE_PCT must be in [0, 100]"
+#endif
+
+#if BE_THROTTLE_IDLE_CYCLES <= 0
+#error "BE_THROTTLE_IDLE_CYCLES must be positive"
 #endif
 
 #if P_MEASURE_LOAD_LATENCY != 0 && P_MEASURE_LOAD_LATENCY != 1
@@ -648,9 +696,9 @@ __global__ void priority_engine(PriorityEngineArgs *a)
 // issues a batch of independent chunk loads before one reduction and counter
 // update to make BE bandwidth-intensive.
 struct BestEffortEngineArgs {
-    const uint64_t *__restrict__ chunk_ptrs;
+    const uint64_t *__restrict__ chunk_ptrs_per_cc[CC_NUM];
+    size_t n_chunks_per_cc[CC_NUM];
     float          *__restrict__ worker_sinks;
-    size_t n_chunks;
     int worker_limit_per_xcd;
     uint32_t active_xcd_mask;
     volatile int *__restrict__ stop;
@@ -659,6 +707,52 @@ struct BestEffortEngineArgs {
     unsigned long long *__restrict__ load_cycle_sums;
     unsigned long long *__restrict__ load_counts;
 };
+
+// Policy d: decides whether a BE batch is skipped.  Tweak granularity here
+// the same way as be_pick_target_cc (per-batch is stationary; per-worker or
+// per-epoch variants hash worker_slot or batch_id / epoch_len instead).
+__device__ __forceinline__
+bool be_batch_throttled(uint32_t xcd_id, unsigned long long batch_id)
+{
+#if BE_THROTTLE_PCT == 0
+    (void)xcd_id; (void)batch_id;
+    return false;
+#else
+    unsigned long long h =
+        (batch_id * 0xd1b54a32d192ed03ULL) ^ ((unsigned long long)xcd_id << 32);
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= h >> 33;
+    return (int)(h % 100ULL) < BE_THROTTLE_PCT;
+#endif
+}
+
+// Picks the CC a BE batch reads from.  Tweak granularity/distribution here
+// (per-batch is stationary; per-worker would be `hash(xcd_id, worker_slot)`,
+// per-epoch `hash(xcd_id, batch_id / epoch_len)`).
+__device__ __forceinline__
+int be_pick_target_cc(uint32_t xcd_id, unsigned long long batch_id)
+{
+#if BE_TARGET_POLICY == 0
+    (void)xcd_id; (void)batch_id;
+    return P_TARGET_CC;
+#else
+    unsigned long long h =
+        (batch_id * 0x9e3779b97f4a7c15ULL) ^ ((unsigned long long)xcd_id << 32);
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= h >> 33;
+#if BE_TARGET_POLICY == 1
+    // Policy c: biased random per (xcd, batch).  P's CC with probability
+    // BE_RANDOM_CC0_PCT, else uniform over the other CCs.
+    if ((int)(h % 100ULL) < BE_RANDOM_CC0_PCT)
+        return P_TARGET_CC;
+#endif
+    // Policy e (and policy c's non-P remainder): uniform over non-P CCs.
+    const int other = (int)((h >> 8) % (unsigned long long)(CC_NUM - 1));
+    return other + (other >= P_TARGET_CC ? 1 : 0);
+#endif
+}
 
 __global__ void best_effort_engine(BestEffortEngineArgs *a)
 {
@@ -698,6 +792,22 @@ __global__ void best_effort_engine(BestEffortEngineArgs *a)
         const unsigned long long batch_id =
             iteration * (unsigned long long)a->worker_limit_per_xcd +
             (unsigned long long)worker_slot;
+        if (be_batch_throttled(xcd_id, batch_id)) {
+            // Skipped batch: idle for one batch's duration; no loads, no
+            // completed-chunk credit (BE GB/s honestly shows the sacrifice).
+            if (tid == 0) {
+                const unsigned long long idle_start = __builtin_readcyclecounter();
+                while (__builtin_readcyclecounter() - idle_start <
+                           (unsigned long long)BE_THROTTLE_IDLE_CYCLES &&
+                       !*a->stop) {}
+                iteration++;
+            }
+            __syncthreads();
+            continue;
+        }
+        const int target_cc = be_pick_target_cc(xcd_id, batch_id);
+        const uint64_t *__restrict__ chunk_ptrs = a->chunk_ptrs_per_cc[target_cc];
+        const size_t n_chunks = a->n_chunks_per_cc[target_cc];
 #if BE_HASHED_BATCHES
         // Hashed batch placement: scatter the batch base per (xcd, batch) so
         // XCDs scan uncorrelated windows.  Sequential laps convoy across XCDs
@@ -706,16 +816,16 @@ __global__ void best_effort_engine(BestEffortEngineArgs *a)
         const unsigned long long mix =
             batch_id * 0x9e3779b97f4a7c15ULL ^ ((unsigned long long)xcd_id << 32);
         const size_t batch_base =
-            (size_t)((mix * 2654435761ULL) % (unsigned long long)a->n_chunks);
+            (size_t)((mix * 2654435761ULL) % (unsigned long long)n_chunks);
 #else   // Sequential laps: each XCD sweeps the full chunk list in order,
         // phase-shifted by 1/XCD_NUM of the list.
         const size_t xcd_phase =
-            (size_t)xcd_id * (a->n_chunks / (size_t)XCD_NUM);
+            (size_t)xcd_id * (n_chunks / (size_t)XCD_NUM);
         const size_t batch_base =
             (xcd_phase +
              (size_t)((batch_id * (unsigned long long)BE_BATCH_CHUNKS) %
-                      (unsigned long long)a->n_chunks)) %
-            a->n_chunks;
+                      (unsigned long long)n_chunks)) %
+            n_chunks;
 #endif
 
         // dwordx4 loads: each thread reads one float4 (16B); a 512-thread block
@@ -727,9 +837,9 @@ __global__ void best_effort_engine(BestEffortEngineArgs *a)
 #pragma unroll 4
         for (int chunk = 0; chunk < BE_BATCH_CHUNKS; chunk += 4) {
             const size_t index =
-                (batch_base + (size_t)chunk + (size_t)chunk_in_quad) % a->n_chunks;
+                (batch_base + (size_t)chunk + (size_t)chunk_in_quad) % n_chunks;
             const float4 *target =
-                reinterpret_cast<const float4 *>(a->chunk_ptrs[index]);
+                reinterpret_cast<const float4 *>(chunk_ptrs[index]);
 #if BE_MEASURE_LOAD_LATENCY
             const unsigned long long load_start = __builtin_readcyclecounter();
             const float4 value = target[lane];

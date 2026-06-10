@@ -22,6 +22,11 @@
 
 #include "db.h"
 
+// Policy c: random BE migration. Build with -DBE_TARGET_POLICY=1.
+#if BE_TARGET_POLICY != 1
+#error "db-c.cpp must be built with BE_TARGET_POLICY=1"
+#endif
+
 // ---------------------------------------------------------------------------
 // Verbosity: 0=quiet, 1=PPNT pings, 2+=misc debug
 // ---------------------------------------------------------------------------
@@ -730,24 +735,27 @@ int main(int argc, char **argv) {
     }
 #endif
 
-    const vector<uint64_t> &be_chunks = be_chunks_per_cc[P_TARGET_CC];
-    if (be_chunks.empty()) {
-        fprintf(stderr, "[DB BE] target CC%d has no classified embedding chunks\n",
-                P_TARGET_CC);
-        return 1;
+    // Upload every CC's chunk list; be_pick_target_cc decides per batch which
+    // one a worker reads (policy b: always P_TARGET_CC; policy c: random CC).
+    uint64_t *d_be_chunk_ptrs_per_cc[CC_NUM] = {};
+    for (int c = 0; c < CC_NUM; c++) {
+        const vector<uint64_t> &cc_chunks = be_chunks_per_cc[c];
+        if (cc_chunks.empty()) {
+            fprintf(stderr, "[DB BE] CC%d has no classified embedding chunks\n", c);
+            return 1;
+        }
+        if (cc_chunks.size() < (size_t)BE_WORKERS_PER_XCD * BE_BATCH_CHUNKS) {
+            fprintf(stderr,
+                    "[DB BE] CC%d has too few chunks for disjoint worker batches\n",
+                    c);
+            return 1;
+        }
+        gpuErrchk(hipMalloc(&d_be_chunk_ptrs_per_cc[c],
+                            sizeof(uint64_t) * cc_chunks.size()));
+        gpuErrchk(hipMemcpy(d_be_chunk_ptrs_per_cc[c], cc_chunks.data(),
+                            sizeof(uint64_t) * cc_chunks.size(),
+                            hipMemcpyHostToDevice));
     }
-    if (be_chunks.size() < (size_t)BE_WORKERS_PER_XCD * BE_BATCH_CHUNKS) {
-        fprintf(stderr,
-                "[DB BE] target CC%d has too few chunks for disjoint worker batches\n",
-                P_TARGET_CC);
-        return 1;
-    }
-
-    uint64_t *d_be_chunk_ptrs = nullptr;
-    gpuErrchk(hipMalloc(&d_be_chunk_ptrs, sizeof(uint64_t) * be_chunks.size()));
-    gpuErrchk(hipMemcpy(d_be_chunk_ptrs, be_chunks.data(),
-                        sizeof(uint64_t) * be_chunks.size(),
-                        hipMemcpyHostToDevice));
     float *d_be_worker_sinks = nullptr;
     gpuErrchk(hipMalloc(&d_be_worker_sinks,
                         sizeof(float) * XCD_NUM * BE_WORKERS_PER_XCD));
@@ -888,11 +896,9 @@ int main(int argc, char **argv) {
                         sizeof(unsigned long long) * be_load_metrics_size));
 
     BestEffortEngineArgs h_be_args = {};
-    // Policy b reads only P_TARGET_CC; point every slot at the same list so
-    // the shared kernel stays valid.
     for (int c = 0; c < CC_NUM; c++) {
-        h_be_args.chunk_ptrs_per_cc[c] = d_be_chunk_ptrs;
-        h_be_args.n_chunks_per_cc[c]   = be_chunks.size();
+        h_be_args.chunk_ptrs_per_cc[c] = d_be_chunk_ptrs_per_cc[c];
+        h_be_args.n_chunks_per_cc[c]   = be_chunks_per_cc[c].size();
     }
     h_be_args.worker_sinks = d_be_worker_sinks;
     h_be_args.worker_limit_per_xcd = BE_WORKERS_PER_XCD;
@@ -906,10 +912,11 @@ int main(int argc, char **argv) {
     gpuErrchk(hipMemcpy(d_be_args, &h_be_args, sizeof(BestEffortEngineArgs),
                         hipMemcpyHostToDevice));
 
-    printf("[DB BE][unmanaged] target=CC%d chunks=%zu (full set/XCD) "
+    printf("[DB BE][random-cc] target=biased random CC cc0_pct=%d%% chunks/cc=%zu "
            "workers=%d/XCD batch=%d chunks active_xcd_mask=0x%02x\n",
-           P_TARGET_CC, be_chunks.size(), BE_WORKERS_PER_XCD, BE_BATCH_CHUNKS,
-           be_active_xcd_mask);
+           BE_RANDOM_CC0_PCT,
+           be_chunks_per_cc[P_TARGET_CC].size(), BE_WORKERS_PER_XCD,
+           BE_BATCH_CHUNKS, be_active_xcd_mask);
 
     // Launch P and BE together for the unmanaged co-location warm-up.
     hipLaunchKernelGGL(priority_engine,
@@ -1157,7 +1164,8 @@ int main(int argc, char **argv) {
     gpuErrchk(hipFree(d_be_load_cycle_sums));
     gpuErrchk(hipFree(d_be_load_counts));
     gpuErrchk(hipFree(d_be_worker_sinks));
-    gpuErrchk(hipFree(d_be_chunk_ptrs));
+    for (int c = 0; c < CC_NUM; c++)
+        gpuErrchk(hipFree(d_be_chunk_ptrs_per_cc[c]));
     gpuErrchk(hipFree(be_flat_data));
     gpuErrchk(hipFree(db_flat_data));
     gpuErrchk(hipStreamDestroy(be_stream));

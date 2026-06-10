@@ -1,9 +1,9 @@
 Policies:
-(a) Priority alone. ideal upper bound
-(b) Unmanaged co-location
-(c) Random BE migration
-(d) Locality-only migration
-(e) Stop all BE engines
-(f) PingPoint-guided selective stopping 
-(g) PingPoint-guided selective migration
-(h) Oracle placement using the ground-truth interference matrix.
+(a) Priority alone. Ideal upper bound. [db-a.cpp]
+(b) Unmanaged co-location: all BE batches target P's CC. [db-b.cpp]
+(c) Random BE migration: each batch targets a random CC; BE_RANDOM_CC0_PCT
+    biases how often it collides with P's CC (25 = uniform, 100 = b). [db-c.cpp]
+(d) Random BE throttling: BE keeps targeting P's CC but skips
+    BE_THROTTLE_PCT% of batches (removes work instead of moving it). [db-d.cpp]
+(e) PingPoint-guided migration: every batch targets a uniform random
+    non-P CC; P's CC sees no BE traffic. [db-e.cpp]

@@ -22,6 +22,15 @@
 
 #include "db.h"
 
+// Policy d: random BE throttling. Build with -DBE_THROTTLE_PCT>0 (and the
+// default BE_TARGET_POLICY=0: BE keeps targeting P's CC, work is removed).
+#if BE_THROTTLE_PCT <= 0
+#error "db-d.cpp must be built with BE_THROTTLE_PCT > 0"
+#endif
+#if BE_TARGET_POLICY != 0
+#error "db-d.cpp must be built with BE_TARGET_POLICY=0"
+#endif
+
 // ---------------------------------------------------------------------------
 // Verbosity: 0=quiet, 1=PPNT pings, 2+=misc debug
 // ---------------------------------------------------------------------------
@@ -906,10 +915,10 @@ int main(int argc, char **argv) {
     gpuErrchk(hipMemcpy(d_be_args, &h_be_args, sizeof(BestEffortEngineArgs),
                         hipMemcpyHostToDevice));
 
-    printf("[DB BE][unmanaged] target=CC%d chunks=%zu (full set/XCD) "
-           "workers=%d/XCD batch=%d chunks active_xcd_mask=0x%02x\n",
-           P_TARGET_CC, be_chunks.size(), BE_WORKERS_PER_XCD, BE_BATCH_CHUNKS,
-           be_active_xcd_mask);
+    printf("[DB BE][random-throttle] target=CC%d throttle=%d%% chunks=%zu "
+           "(full set/XCD) workers=%d/XCD batch=%d chunks active_xcd_mask=0x%02x\n",
+           P_TARGET_CC, BE_THROTTLE_PCT, be_chunks.size(), BE_WORKERS_PER_XCD,
+           BE_BATCH_CHUNKS, be_active_xcd_mask);
 
     // Launch P and BE together for the unmanaged co-location warm-up.
     hipLaunchKernelGGL(priority_engine,
