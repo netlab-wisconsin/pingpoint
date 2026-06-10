@@ -797,10 +797,8 @@ int main(int argc, char **argv) {
 
     // Policy (a): Priority alone. Warm up once, then reset and collect an
     // uncontaminated fixed-duration measurement from a second launch.
-    // constexpr int priority_warmup_seconds = 2;
-    // constexpr int priority_measure_seconds = 10;
-    constexpr int priority_warmup_seconds = 2;
-    constexpr int priority_measure_seconds = 5;
+    constexpr int priority_warmup_seconds = 1;
+    constexpr int priority_measure_seconds = 2;
 
     auto stop_priority_engine = [&]() {
         int priority_stop = 1;
