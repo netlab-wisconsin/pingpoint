@@ -659,17 +659,18 @@ int main(int argc, char **argv) {
     // DB SETUP
     // =========================================================================
 
-    // Total embedding entries (argv[1]).
+    // P working set; keep in sync with N_P_ENTRIES in db-b.cpp.
     char *db_flat_data = nullptr;
-    const int N_DB_ENTRIES = (argc > 1) ? atoi(argv[1]) : (1 << 19); // 524288
-    assert(N_DB_ENTRIES % 32768 == 0 && "N_DB_ENTRIES must be a multiple of 32768 (64MB / CHUNK_SIZE)");
-    const size_t db_flat_size = (size_t)N_DB_ENTRIES * CHUNK_SIZE; // CHUNK_SIZE = DB_ENTRY_DIM * sizeof(float) = 2KB
+    constexpr int N_P_ENTRIES = (1 << 19); // 524288 -> 1GB total, ~256MB/CC
+    static_assert(N_P_ENTRIES % 32768 == 0,
+                  "N_P_ENTRIES must be a multiple of 32768 (64MB / CHUNK_SIZE)");
+    const size_t db_flat_size = (size_t)N_P_ENTRIES * CHUNK_SIZE; // CHUNK_SIZE = DB_ENTRY_DIM * sizeof(float) = 2KB
     gpuErrchk(hipMalloc(&db_flat_data, db_flat_size));
 
     vector<uint32_t> db_chunk_home_xcd;
     vector<vector<uint64_t>> p_chunks_per_cc;
     if (db::home_identification(db_flat_data, db_flat_size,
-                                (size_t)N_DB_ENTRIES, db_chunk_home_xcd,
+                                (size_t)N_P_ENTRIES, db_chunk_home_xcd,
                                 p_chunks_per_cc) == -1)
         return -1;
 
@@ -697,7 +698,7 @@ int main(int argc, char **argv) {
     gpuErrchk(hipMemcpy(d_priority_chunk_ptrs, priority_chunks.data(),
                         sizeof(uint64_t) * priority_chunks.size(),
                         hipMemcpyHostToDevice));
-    const size_t priority_metrics_capacity = (size_t)N_DB_ENTRIES;
+    const size_t priority_metrics_capacity = (size_t)N_P_ENTRIES;
 
     float *d_priority_worker_sinks = nullptr;
     gpuErrchk(hipMalloc(&d_priority_worker_sinks, sizeof(float) * P_WORKERS));
@@ -798,8 +799,8 @@ int main(int argc, char **argv) {
     // uncontaminated fixed-duration measurement from a second launch.
     // constexpr int priority_warmup_seconds = 2;
     // constexpr int priority_measure_seconds = 10;
-    constexpr int priority_warmup_seconds = 0;
-    constexpr int priority_measure_seconds = 1;
+    constexpr int priority_warmup_seconds = 2;
+    constexpr int priority_measure_seconds = 5;
 
     auto stop_priority_engine = [&]() {
         int priority_stop = 1;

@@ -659,17 +659,21 @@ int main(int argc, char **argv) {
     // DB SETUP
     // =========================================================================
 
-    // Total embedding entries (argv[1]).
+    // P keeps a small working set; BE gets a larger one so its per-CC chunk
+    // set far exceeds the LLC and BE traffic actually reaches HBM.
     char *db_flat_data = nullptr;
-    const int N_DB_ENTRIES = (argc > 1) ? atoi(argv[1]) : (1 << 19); // 524288
-    assert(N_DB_ENTRIES % 32768 == 0 && "N_DB_ENTRIES must be a multiple of 32768 (64MB / CHUNK_SIZE)");
-    const size_t db_flat_size = (size_t)N_DB_ENTRIES * CHUNK_SIZE; // CHUNK_SIZE = DB_ENTRY_DIM * sizeof(float) = 2KB
+    constexpr int N_P_ENTRIES  = (1 << 19); // 524288 -> 1GB total, ~256MB/CC
+    constexpr int N_BE_ENTRIES = (1 << 22); // 4194304 -> 8GB total, ~2GB/CC
+    static_assert(N_P_ENTRIES % 32768 == 0 && N_BE_ENTRIES % 32768 == 0,
+                  "entry counts must be multiples of 32768 (64MB / CHUNK_SIZE)");
+    const size_t db_flat_size = (size_t)N_P_ENTRIES * CHUNK_SIZE; // CHUNK_SIZE = DB_ENTRY_DIM * sizeof(float) = 2KB
+    const size_t be_flat_size = (size_t)N_BE_ENTRIES * CHUNK_SIZE;
     gpuErrchk(hipMalloc(&db_flat_data, db_flat_size));
 
     vector<uint32_t> db_chunk_home_xcd;
     vector<vector<uint64_t>> p_chunks_per_cc;
     if (db::home_identification(db_flat_data, db_flat_size,
-                                (size_t)N_DB_ENTRIES, db_chunk_home_xcd,
+                                (size_t)N_P_ENTRIES, db_chunk_home_xcd,
                                 p_chunks_per_cc) == -1)
         return -1;
 
@@ -697,7 +701,7 @@ int main(int argc, char **argv) {
     gpuErrchk(hipMemcpy(d_priority_chunk_ptrs, priority_chunks.data(),
                         sizeof(uint64_t) * priority_chunks.size(),
                         hipMemcpyHostToDevice));
-    const size_t priority_metrics_capacity = (size_t)N_DB_ENTRIES;
+    const size_t priority_metrics_capacity = (size_t)N_P_ENTRIES;
 
     float *d_priority_worker_sinks = nullptr;
     gpuErrchk(hipMalloc(&d_priority_worker_sinks, sizeof(float) * P_WORKERS));
@@ -707,11 +711,11 @@ int main(int argc, char **argv) {
     // Unmanaged BE uses separate data from P, but all BE workers target the
     // same classified CC as P to create controlled many-to-one path contention.
     char *be_flat_data = nullptr;
-    gpuErrchk(hipMalloc(&be_flat_data, db_flat_size));
+    gpuErrchk(hipMalloc(&be_flat_data, be_flat_size));
     vector<uint32_t> be_chunk_home_xcd;
     vector<vector<uint64_t>> be_chunks_per_cc;
-    if (db::home_identification(be_flat_data, db_flat_size,
-                                (size_t)N_DB_ENTRIES, be_chunk_home_xcd,
+    if (db::home_identification(be_flat_data, be_flat_size,
+                                (size_t)N_BE_ENTRIES, be_chunk_home_xcd,
                                 be_chunks_per_cc) == -1)
         return -1;
 
@@ -749,7 +753,7 @@ int main(int argc, char **argv) {
                         sizeof(float) * XCD_NUM * BE_WORKERS_PER_XCD));
     gpuErrchk(hipMemset(d_be_worker_sinks, 0,
                         sizeof(float) * XCD_NUM * BE_WORKERS_PER_XCD));
-    gpuErrchk(hipMemset(be_flat_data, 2, db_flat_size));
+    gpuErrchk(hipMemset(be_flat_data, 2, be_flat_size));
 
     // -------------------------------------------------------------------------
     // Launch the open-loop priority embedding scan on P_ACTIVE_XCD.
@@ -912,8 +916,8 @@ int main(int argc, char **argv) {
     // both engines and collect a fixed-duration co-location measurement.
     // constexpr int priority_warmup_seconds = 2;
     // constexpr int priority_measure_seconds = 10;
-    constexpr int priority_warmup_seconds = 0;
-    constexpr int priority_measure_seconds = 1;
+    constexpr int priority_warmup_seconds = 2;
+    constexpr int priority_measure_seconds = 5;
 
     auto stop_unmanaged_engines = [&]() {
         int stop = 1;

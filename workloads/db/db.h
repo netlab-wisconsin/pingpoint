@@ -99,6 +99,11 @@ namespace db_cg = cooperative_groups;
 #define DEBUG_DB 0
 #endif
 
+// Verbose home-identification logging (matches DEBUG_K1_HOME / DEBUG_K2_HOME)
+#ifndef DEBUG_DB_HOME
+#define DEBUG_DB_HOME 0
+#endif
+
 #ifndef P_WORKERS
 #define P_WORKERS 8
 #endif
@@ -121,6 +126,13 @@ namespace db_cg = cooperative_groups;
 
 #ifndef BE_BATCH_CHUNKS
 #define BE_BATCH_CHUNKS 64
+#endif
+
+// 1: BE batch base hashed per (xcd, batch) — XCDs scan uncorrelated windows
+//    so BE traffic actually hits HBM (default).
+// 0: sequential laps, phase-shifted per XCD; convoys MALL-hit across XCDs.
+#ifndef BE_HASHED_BATCHES
+#define BE_HASHED_BATCHES 1
 #endif
 
 #ifndef P_MEASURE_LOAD_LATENCY
@@ -148,6 +160,14 @@ namespace db_cg = cooperative_groups;
 
 #if BE_BATCH_CHUNKS < 4 || (BE_BATCH_CHUNKS % 4) != 0
 #error "BE_BATCH_CHUNKS must be a positive multiple of 4"
+#endif
+
+// BE dwordx4 path: 512 threads = 4 chunks x 128 float4 lanes per iteration.
+static_assert(BE_BLOCKDIM_X == DB_ENTRY_DIM && DB_ENTRY_DIM % 4 == 0,
+              "BE dwordx4 loads require BE_BLOCKDIM_X == DB_ENTRY_DIM, a multiple of 4");
+
+#if BE_HASHED_BATCHES != 0 && BE_HASHED_BATCHES != 1
+#error "BE_HASHED_BATCHES must be 0 or 1"
 #endif
 
 #if P_MEASURE_LOAD_LATENCY != 0 && P_MEASURE_LOAD_LATENCY != 1
@@ -213,6 +233,12 @@ __global__ void identify_home(void *data, size_t size, uint32_t *d_cycles, int n
     int n_tbs_in_xcd = gridDim.x / XCD_NUM;
     int tbid_in_xcd = (bid / XCD_NUM) % n_tbs_in_xcd;
 
+    if (tid == 0) {
+        #if DEBUG_DB_HOME
+        printf("bid %d: tbid_in_xcd %d\n", bid, tbid_in_xcd);
+        #endif
+    }
+
     assert(n_tbs_in_xcd * XCD_NUM == gridDim.x);
     assert(n_tbs_in_xcd == 1);
     assert(blockDim.x == 128);
@@ -223,6 +249,16 @@ __global__ void identify_home(void *data, size_t size, uint32_t *d_cycles, int n
     uint32_t xcc_id;
     asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=r"(xcc_id));
 
+    #if DEBUG_DB_HOME
+    {
+        uint32_t cu_id, se_id;
+        asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID, 8, 4)" : "=r"(cu_id));
+        asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID, 13, 3)" : "=r"(se_id));
+        if (tid == 0)
+            printf("bid %d: (xcc_id: %u, se_id: %u, cu_id: %u)\n", bid, xcc_id, se_id, cu_id);
+    }
+    #endif
+
     uint4 *data_u4 = (uint4 *)data;
     const size_t inner_size = 64 * 1024 * 1024;
     const size_t n_outer = size / inner_size;
@@ -230,9 +266,22 @@ __global__ void identify_home(void *data, size_t size, uint32_t *d_cycles, int n
     assert(size % inner_size == 0);
     assert((size_t)n_chunks == n_outer * n_inner * n_tbs_in_xcd);
 
+    if (bid == 0 && tid == 0) {
+        #if DEBUG_DB_HOME
+        printf("n_outer: %zu, n_inner: %zu, n_chunks: %d\n", n_outer, n_inner, n_chunks);
+        printf("working set per xcd: %.2f MB\n", size / (1024.0 * 1024.0));
+        #endif
+    }
+
     for (size_t i = 0; i < n_outer; i++) {
         for (size_t j = 0; j < n_inner; j++) {
             size_t index = (i * n_inner + j) * blockDim.x + tid;
+            if (tid == 0) {
+                #if DEBUG_DB_HOME >= 2
+                printf("[warmup] (outer:%zu, inner:%zu, bid:%d) accessing data_u4[%zu..%zu]\n",
+                       i, j, bid, index, index + blockDim.x - 1);
+                #endif
+            }
             asm volatile(
                 "flat_load_dwordx4 v[0:3], %0\n\t"
                 "s_waitcnt vmcnt(0) & lgkmcnt(0)\n\t"
@@ -261,6 +310,9 @@ __global__ void identify_home(void *data, size_t size, uint32_t *d_cycles, int n
             if (tid == 0) {
                 size_t chunk = (i * n_inner + j) * n_tbs_in_xcd + tbid_in_xcd;
                 d_cycles[(size_t)xcc_id * n_chunks + chunk] = end - start;
+                #if DEBUG_DB_HOME >= 2
+                printf("xcc %u chunk[%zu]: %u cycles\n", xcc_id, chunk, end - start);
+                #endif
             }
 #if DB_USE_GLOBAL_BARRIER
             home_global_barrier();
@@ -306,6 +358,7 @@ static int home_identification(
     const int xcd_per_cc = XCD_NUM / CC_NUM;
     chunk_home_xcd.assign(n_chunks, UINT32_MAX);
     chunks_per_cc.assign(CC_NUM, vector<uint64_t>());
+    vector<size_t> chunks_per_xcd(XCD_NUM, 0);
     for (size_t k = 0; k < n_chunks; k++) {
         uint32_t min_cycles = UINT32_MAX;
         int min_xcc = -1;
@@ -316,9 +369,24 @@ static int home_identification(
             }
         }
         chunk_home_xcd[k] = (uint32_t)min_xcc;
+        chunks_per_xcd[min_xcc]++;
         chunks_per_cc[min_xcc / xcd_per_cc].push_back(
             reinterpret_cast<uint64_t>(d_data + k * CHUNK_SIZE));
+        #if DEBUG_DB_HOME
+        printf("chunk[%zu]: cycles per xcd [", k);
+        for (int x = 0; x < XCD_NUM; x++)
+            printf("%s%u", x ? " " : "", h_cycles[x][k]);
+        printf("] -> home xcd %d (cc%d, %u cycles)\n",
+               min_xcc, min_xcc / xcd_per_cc, min_cycles);
+        #endif
     }
+    #if DEBUG_DB_HOME
+    for (int x = 0; x < XCD_NUM; x++)
+        printf("xcd %d: n_chunks %zu\n", x, chunks_per_xcd[x]);
+    for (int c = 0; c < CC_NUM; c++)
+        printf("cc %d: n_chunks %zu\n", c, chunks_per_cc[c].size());
+    printf("\n");
+    #endif
 
     gpuErrchk(hipFree(d_cycles));
     return 0;
@@ -479,6 +547,7 @@ __global__ void priority_engine(PriorityEngineArgs *a)
     __shared__ float reduction[P_BLOCKDIM_X];
     unsigned long long thread_load_cycle_sum = 0;
     unsigned long long thread_load_count = 0;
+    unsigned long long worker_completed = 0;
 
     if (tid == 0) {
         unsigned long long slot = atomicAdd(a->worker_slots_claimed, 1ULL);
@@ -496,29 +565,25 @@ __global__ void priority_engine(PriorityEngineArgs *a)
     }
     __syncthreads();
 
+    // Static round-robin dispatch: worker w owns requests w, w+W, w+2W, ...
+    // Dispatch needs no shared state, so per-request overhead is one clock spin;
+    // a backlogged worker sees arrival in the past and serves immediately.
     while (true) {
         if (tid == 0) {
             should_stop = 0;
+            const unsigned long long next =
+                worker_completed * (unsigned long long)a->worker_limit +
+                (unsigned long long)worker_slot;
+            const unsigned long long arrival =
+                *a->start_cycle + next * a->arrival_interval_cycles;
             while (true) {
                 if (*a->stop) {
                     should_stop = 1;
                     break;
                 }
-
-                const unsigned long long now = __builtin_readcyclecounter();
-                const unsigned long long start = *a->start_cycle;
-                if (now < start)
-                    continue;
-
-                const unsigned long long arrived =
-                    1ULL + (now - start) / a->arrival_interval_cycles;
-                unsigned long long next = *a->next_request;
-                if (next >= arrived)
-                    continue;
-
-                if (atomicCAS(a->next_request, next, next + 1ULL) == next) {
+                if (__builtin_readcyclecounter() >= arrival) {
                     request_id = next;
-                    arrival_cycle = start + next * a->arrival_interval_cycles;
+                    arrival_cycle = arrival;
                     break;
                 }
             }
@@ -563,10 +628,13 @@ __global__ void priority_engine(PriorityEngineArgs *a)
                 a->queue_latencies[slot] = completion - arrival_cycle;
                 a->service_latencies[slot] = completion - service_start;
             }
-            atomicAdd(a->completed_requests, 1ULL);
+            worker_completed++;
         }
         __syncthreads();
     }
+
+    if (tid == 0)
+        atomicAdd(a->completed_requests, worker_completed);
 
 #if P_MEASURE_LOAD_LATENCY
     const size_t load_slot = (size_t)worker_slot * blockDim.x + tid;
@@ -630,6 +698,17 @@ __global__ void best_effort_engine(BestEffortEngineArgs *a)
         const unsigned long long batch_id =
             iteration * (unsigned long long)a->worker_limit_per_xcd +
             (unsigned long long)worker_slot;
+#if BE_HASHED_BATCHES
+        // Hashed batch placement: scatter the batch base per (xcd, batch) so
+        // XCDs scan uncorrelated windows.  Sequential laps convoy across XCDs
+        // and turn the scan into MALL hits instead of HBM traffic.  Batches
+        // stay 64-chunk sequential.
+        const unsigned long long mix =
+            batch_id * 0x9e3779b97f4a7c15ULL ^ ((unsigned long long)xcd_id << 32);
+        const size_t batch_base =
+            (size_t)((mix * 2654435761ULL) % (unsigned long long)a->n_chunks);
+#else   // Sequential laps: each XCD sweeps the full chunk list in order,
+        // phase-shifted by 1/XCD_NUM of the list.
         const size_t xcd_phase =
             (size_t)xcd_id * (a->n_chunks / (size_t)XCD_NUM);
         const size_t batch_base =
@@ -637,64 +716,33 @@ __global__ void best_effort_engine(BestEffortEngineArgs *a)
              (size_t)((batch_id * (unsigned long long)BE_BATCH_CHUNKS) %
                       (unsigned long long)a->n_chunks)) %
             a->n_chunks;
-
-        float accum0 = 0.0f;
-        float accum1 = 0.0f;
-        float accum2 = 0.0f;
-        float accum3 = 0.0f;
-        for (int chunk = 0; chunk < BE_BATCH_CHUNKS; chunk += 4) {
-            const size_t index0 = (batch_base + (size_t)chunk + 0) % a->n_chunks;
-            const size_t index1 = (batch_base + (size_t)chunk + 1) % a->n_chunks;
-            const size_t index2 = (batch_base + (size_t)chunk + 2) % a->n_chunks;
-            const size_t index3 = (batch_base + (size_t)chunk + 3) % a->n_chunks;
-            const float *target0 =
-                reinterpret_cast<const float *>(a->chunk_ptrs[index0]);
-            const float *target1 =
-                reinterpret_cast<const float *>(a->chunk_ptrs[index1]);
-            const float *target2 =
-                reinterpret_cast<const float *>(a->chunk_ptrs[index2]);
-            const float *target3 =
-                reinterpret_cast<const float *>(a->chunk_ptrs[index3]);
-            for (int d = tid; d < DB_ENTRY_DIM; d += blockDim.x) {
-#if BE_MEASURE_LOAD_LATENCY
-                unsigned long long load_start = __builtin_readcyclecounter();
-                const float value0 = target0[d];
-                asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-                unsigned long long load_end = __builtin_readcyclecounter();
-                thread_load_cycle_sum += load_end - load_start;
-
-                load_start = __builtin_readcyclecounter();
-                const float value1 = target1[d];
-                asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-                load_end = __builtin_readcyclecounter();
-                thread_load_cycle_sum += load_end - load_start;
-
-                load_start = __builtin_readcyclecounter();
-                const float value2 = target2[d];
-                asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-                load_end = __builtin_readcyclecounter();
-                thread_load_cycle_sum += load_end - load_start;
-
-                load_start = __builtin_readcyclecounter();
-                const float value3 = target3[d];
-                asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-                load_end = __builtin_readcyclecounter();
-                thread_load_cycle_sum += load_end - load_start;
-                thread_load_count += 4;
-
-                accum0 += value0;
-                accum1 += value1;
-                accum2 += value2;
-                accum3 += value3;
-#else
-                accum0 += target0[d];
-                accum1 += target1[d];
-                accum2 += target2[d];
-                accum3 += target3[d];
 #endif
-            }
+
+        // dwordx4 loads: each thread reads one float4 (16B); a 512-thread block
+        // covers 4 full 2KB chunks per iteration (128 float4 lanes per chunk).
+        const int chunk_in_quad = tid >> 7;
+        const int lane = tid & 127;
+
+        float accum = 0.0f;
+#pragma unroll 4
+        for (int chunk = 0; chunk < BE_BATCH_CHUNKS; chunk += 4) {
+            const size_t index =
+                (batch_base + (size_t)chunk + (size_t)chunk_in_quad) % a->n_chunks;
+            const float4 *target =
+                reinterpret_cast<const float4 *>(a->chunk_ptrs[index]);
+#if BE_MEASURE_LOAD_LATENCY
+            const unsigned long long load_start = __builtin_readcyclecounter();
+            const float4 value = target[lane];
+            asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+            const unsigned long long load_end = __builtin_readcyclecounter();
+            thread_load_cycle_sum += load_end - load_start;
+            thread_load_count++;
+#else
+            const float4 value = target[lane];
+#endif
+            accum += value.x + value.y + value.z + value.w;
         }
-        const float partial = accum0 + accum1 + accum2 + accum3;
+        const float partial = accum;
 
         reduction[tid] = partial;
         __syncthreads();
