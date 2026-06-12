@@ -8,16 +8,12 @@
 using namespace std;
 
 #define XCD_NUM 8
-#define HBM_NUM 8
-#define CC_NUM  4 
-#define XCD_PER_CC (XCD_NUM / CC_NUM)
-#define CU_NUM  36
+#define CC_NUM  2
+#define CU_NUM  32
 
 #define L2_SIZE (4 * 1024 * 1024) // 4 MB
 #define LLC_SIZE (256 * 1024 * 1024) // 256 MB
-
-#define PAGE_SIZE (2 * 1024 * 1024) // 2 MB huge page
-#define CHUNK_SIZE (2 * 1024) // 2 KB chunk size
+#define K2_CHUNK_SIZE (8 * 1024) // MI350 IOD/CC interleaving granularity
 
 // GPU error check
 #ifndef gpuErrchk
