@@ -19,12 +19,22 @@
 #define WARMUP_PASSES    10
 #define BPX_DEFAULT      8
 
+// Baseline / Ping plan enables
+#define DISABLE_BASELINE 0
+#define DISABLE_K1_PLANS 0
+#define DISABLE_K2_PLANS 0
+
 // Ping lengths: must outlast the target (see moe_serving.cpp header note).
 #define PING_ITERS_K1 (1 << 23)
 #define PING_ITERS_K2 (1 << 20)
 
-// Plan indices
-enum { PLAN_NULL = 0, PLAN_LAT = 1, PLAN_BW = 2, N_PLAN_KINDS = 3 };
+// Ping plan selection: 1 = build only the customized plans in the #else blocks of
+// moe_serving.cpp (default); 0 = build the full cross-product of src_xcd x dst_hbm
+// (latency) and src_xcd x dst_hbm x #active-CU (bandwidth).
+#define PPNT_PLAN_SELECTED_ONLY 1
+
+// Bandwidth ping #active CUs (bpx) swept in the full (non-selected) construction.
+inline constexpr int BW_ACTIVE_CUS[] = { 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16 };
 
 // Swept ping rates (Option-A duty cycle) for the latency/bandwidth conditions.
 inline constexpr double PING_RATES[] = { 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0 };

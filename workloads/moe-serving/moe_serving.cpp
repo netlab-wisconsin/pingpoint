@@ -106,13 +106,19 @@ int main(int argc, char **argv) {
     // =============================================================================================
     vector<k1::dtype*> k1_dbuf_start_ptrs_per_hbm(HBM_NUM, nullptr);
     k1::dtype *k1_dummy_buf = nullptr;
+#if !(DISABLE_K1_PLANS)
     {
         k1::dtype *dbuf_base = nullptr;
         gpuErrchk(hipMallocManaged(&k1_dummy_buf, sizeof(k1::dtype)));
         k1_dummy_buf[0] = 0;
 
-        const size_t LEN = (1 << 16); // 8MB per HBM
+#if (FAST)
+        const size_t LEN = (1 << 16); // 8MB per HBM (cache-resident; fast debug)
         const size_t multiplicative_factor = XCD_NUM * 2;
+#else
+        const size_t LEN = (1 << 22); // 512MB per HBM (exceeds LLC -> hits real HBM)
+        const size_t multiplicative_factor = XCD_NUM * 1;
+#endif
         const size_t cl_bytes = 128;
         const size_t cl_size = cl_bytes / sizeof(k1::dtype);
         const size_t skip_factor = 1;
@@ -152,6 +158,7 @@ int main(int argc, char **argv) {
         gpuErrchk(hipMemcpy(dbuf_base, buf.data(), n_dtype_dbuf * sizeof(k1::dtype), hipMemcpyHostToDevice));
         gpuErrchk(hipDeviceSynchronize());
     }
+#endif // !(DISABLE_K1_PLANS)
 
     // =============================================================================================
     // K2 SETUP (bandwidth ping streaming chunks, grouped per HBM)  [FAST path]
@@ -160,8 +167,13 @@ int main(int argc, char **argv) {
     vector<uint64_t*> k2_d_chunks_per_hbm(k2_n_datas);
     vector<vector<size_t>> k2_h_offsets(k2_n_datas, vector<size_t>(HBM_NUM));
     vector<size_t> k2_min_num_chunks_over_n_datas(HBM_NUM);
+#if !(DISABLE_K2_PLANS)
     {
-        const long long k2_n_pages = 512;            // 1GB per data (FAST)
+#if (FAST)
+        const long long k2_n_pages = 512;            // 1GB per data (cache-resident; fast debug)
+#else
+        const long long k2_n_pages = (128 << 6);     // 16GB per data (exceeds LLC -> streams HBM)
+#endif
         const int k2_page_size = PAGE_SIZE;
         const long long k2_data_size = (k2_n_pages * k2_page_size);
         const int k2_chunk_size = CHUNK_SIZE;
@@ -199,6 +211,7 @@ int main(int argc, char **argv) {
                 k2_min_num_chunks_over_n_datas[x] =
                     min(k2_min_num_chunks_over_n_datas[x], k2_h_xcd_chunks_size[i][x]);
     }
+#endif // !(DISABLE_K2_PLANS)
 
     // =============================================================================================
     // GRID CONFIG (persistent cooperative grid: 1 block / CU, rounded to XCD_NUM)
@@ -210,50 +223,91 @@ int main(int argc, char **argv) {
         physical_grid_size = (target_physical_blocks / XCD_NUM) * XCD_NUM;
         if (physical_grid_size < XCD_NUM) physical_grid_size = XCD_NUM;
     }
-    const int dst_hbm = 0, src_xcd = 0;
-
     // =============================================================================================
-    // BUILD 3 PLANS: null (bpx=0), latency (bpx=1), bandwidth (bpx=bpx_bw). All src0 -> hbm0.
+    // BUILD PING PLANS
+    //   index 0 = null plan (bpx=0): no ping, full grid, used for non-ping passes.
+    //   then latency plans (src_xcd x dst_hbm), then bandwidth plans (src x hbm x #active-CU).
+    //   PPNT_PLAN_SELECTED_ONLY=1 -> only the customized plans in the #else blocks below.
     // =============================================================================================
-    vector<ppnt::PingSpec> h_plan(N_PLAN_KINDS);
-    vector<ppnt::PingOut2> h_out2(N_PLAN_KINDS);
-    ppnt::PingSpec* d_plan[N_PLAN_KINDS];
-    ppnt::PingOut2* d_out2[N_PLAN_KINDS];
+    vector<ppnt::PingSpec>  h_plan;   // host-side, kept for src/hbm/bpx lookup
+    vector<ppnt::PingSpec*> d_plan;   // per-plan device copies
+    size_t max_iterclk = 1;
 
-    auto bw_data_bytes = CHUNK_SIZE * k2_min_num_chunks_over_n_datas[dst_hbm];
     float* bw_sink = nullptr;
     gpuErrchk(hipMalloc(&bw_sink, sizeof(float) * (size_t)TARGET_BLOCKDIM_X * physical_grid_size));
 
-    for (int k = 0; k < N_PLAN_KINDS; k++) {
+    auto add_plan = [&](ppnt::PingSpec p) -> int {
+        int idx = (int)h_plan.size();
+        p.ping_id = idx;
+        max_iterclk = max(max_iterclk, p.iters * max((size_t)1, p.bpx));
+        h_plan.push_back(p);
+        ppnt::PingSpec* dp = nullptr;
+        gpuErrchk(hipMalloc(&dp, sizeof(ppnt::PingSpec)));
+        gpuErrchk(hipMemcpy(dp, &h_plan.back(), sizeof(ppnt::PingSpec), hipMemcpyHostToDevice));
+        d_plan.push_back(dp);
+        return idx;
+    };
+    auto make_lat = [&](int src, int hbm) {
         ppnt::PingSpec p{};
-        p.ping_id = k; p.src_xcd = src_xcd; p.dst_hbm = dst_hbm;
-        if (k == PLAN_NULL) {                 // no ping: full grid, records target span
-            p.kind = ppnt::PingKind::Bandwidth; p.bpx = 0; p.iters = 1;
-        } else if (k == PLAN_LAT) {           // latency ping
-            p.kind = ppnt::PingKind::Latency;  p.bpx = 1; p.iters = PING_ITERS_K1;
-            p.data = k1_dbuf_start_ptrs_per_hbm[dst_hbm]; p.dummy = k1_dummy_buf;
-        } else {                              // bandwidth ping
-            p.kind = ppnt::PingKind::Bandwidth; p.bpx = bpx_bw; p.iters = PING_ITERS_K2;
-            p.data_bytes = bw_data_bytes;
-            p.data0 = k2_d_chunks_per_hbm[0] + k2_h_offsets[0][dst_hbm];
-            p.data1 = k2_d_chunks_per_hbm[1] + k2_h_offsets[1][dst_hbm];
-            p.data2 = k2_d_chunks_per_hbm[2] + k2_h_offsets[2][dst_hbm];
-            p.data3 = k2_d_chunks_per_hbm[3] + k2_h_offsets[3][dst_hbm];
-            p.sink  = bw_sink;
-        }
-        h_plan[k] = p;
+        p.kind = ppnt::PingKind::Latency; p.src_xcd = src; p.dst_hbm = hbm;
+        p.bpx = 1; p.iters = PING_ITERS_K1;
+        p.data = k1_dbuf_start_ptrs_per_hbm[hbm]; p.dummy = k1_dummy_buf;
+        return p;
+    };
+    auto make_bw = [&](int src, int hbm, int n_cu) {
+        ppnt::PingSpec p{};
+        p.kind = ppnt::PingKind::Bandwidth; p.src_xcd = src; p.dst_hbm = hbm;
+        p.bpx = (size_t)n_cu; p.iters = PING_ITERS_K2;
+        p.data_bytes = CHUNK_SIZE * k2_min_num_chunks_over_n_datas[hbm];
+        p.data0 = k2_d_chunks_per_hbm[0] + k2_h_offsets[0][hbm];
+        p.data1 = k2_d_chunks_per_hbm[1] + k2_h_offsets[1][hbm];
+        p.data2 = k2_d_chunks_per_hbm[2] + k2_h_offsets[2][hbm];
+        p.data3 = k2_d_chunks_per_hbm[3] + k2_h_offsets[3][hbm];
+        p.sink  = bw_sink;
+        return p;
+    };
 
-        ppnt::PingOut2 o2{};
-        gpuErrchk(hipMalloc(&o2.iterClk, sizeof(uint64_t) * max((size_t)1, p.iters * p.bpx)));
-        gpuErrchk(hipMalloc(&o2.moe_start_clk, sizeof(uint64_t)));
-        gpuErrchk(hipMalloc(&o2.moe_end_clk,   sizeof(uint64_t)));
-        h_out2[k] = o2;
+    // index 0: null plan (no ping)
+    { ppnt::PingSpec p{}; p.kind = ppnt::PingKind::Bandwidth; p.src_xcd = 0; p.dst_hbm = 0;
+      p.bpx = 0; p.iters = 1; add_plan(p); }
+    const int NULL_IDX = 0;
 
-        gpuErrchk(hipMalloc(&d_plan[k], sizeof(ppnt::PingSpec)));
-        gpuErrchk(hipMalloc(&d_out2[k], sizeof(ppnt::PingOut2)));
-        gpuErrchk(hipMemcpy(d_plan[k], &h_plan[k], sizeof(ppnt::PingSpec), hipMemcpyHostToDevice));
-        gpuErrchk(hipMemcpy(d_out2[k], &h_out2[k], sizeof(ppnt::PingOut2), hipMemcpyHostToDevice));
-    }
+    vector<int> lat_idx, bw_idx;
+
+#if !(DISABLE_K1_PLANS)
+#if !(PPNT_PLAN_SELECTED_ONLY)
+    for (int x = 0; x < XCD_NUM; x++)
+        for (int v = 0; v < HBM_NUM; v++)
+            lat_idx.push_back(add_plan(make_lat(x, v)));
+#else
+    // --- customize latency (src_xcd, dst_hbm) pairs here ---
+    lat_idx.push_back(add_plan(make_lat(0, 0)));
+#endif
+#endif
+
+#if !(DISABLE_K2_PLANS)
+#if !(PPNT_PLAN_SELECTED_ONLY)
+    for (int x = 0; x < XCD_NUM; x++)
+        for (int v = 0; v < HBM_NUM; v++)
+            for (int n_cu : BW_ACTIVE_CUS)
+                bw_idx.push_back(add_plan(make_bw(x, v, n_cu)));
+#else
+    // --- customize bandwidth (src_xcd, dst_hbm, #active-CU) triples here ---
+    bw_idx.push_back(add_plan(make_bw(0, 0, bpx_bw)));
+#endif
+#endif
+
+    // Single shared iterClk scratch. The ping kernels (k1/k2) write per-iteration cycle counts
+    // into this buffer, but moe-serving never reads it (our metric is the target's clock span,
+    // d_target_dur, not the ping's own timing). Since passes run one plan at a time and are
+    // stream-synchronized, all plans can safely overwrite one buffer sized to the max iters*bpx,
+    // and it is never copied back to the host.
+    //
+    // NOTE: if we later want the ping's own latency/bandwidth (as moe.cpp reports via
+    // parse_pingouts), revert to a per-plan iterClk buffer (a shared one is clobbered every pass)
+    // and add the device->host copy + parse.
+    uint64_t* d_iterclk_scratch = nullptr;
+    gpuErrchk(hipMalloc(&d_iterclk_scratch, sizeof(uint64_t) * max_iterclk));
 
     // =============================================================================================
     // FFN1 (Gemm1) TARGET DATA
@@ -300,9 +354,8 @@ int main(int argc, char **argv) {
         static const uint64_t zero = 0;
         gpuErrchk(hipMemcpy(d_target_dur, &zero, sizeof(uint64_t), hipMemcpyHostToDevice));
 
-        uint64_t* iterclk = h_out2[plan_idx].iterClk;
         void* kargs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan[plan_idx],
-                          (void*)&d_target_dur, (void*)&iterclk };
+                          (void*)&d_target_dur, (void*)&d_iterclk_scratch };
 
         hipEvent_t ev_s, ev_e;
         gpuErrchk(hipEventCreate(&ev_s)); gpuErrchk(hipEventCreate(&ev_e));
@@ -325,22 +378,26 @@ int main(int argc, char **argv) {
     // =============================================================================================
     // SERVING-LOOP SWEEP
     // =============================================================================================
-    printf("[MoE-serving] regime=%s T=%d d=%d hidden=%d E=%d cap=%d | grid=%d bpx_bw=%d N=%d warmup=%d\n",
-           regime.c_str(), T, d, hidden, E, cap, physical_grid_size, bpx_bw, N, WARMUP_PASSES);
-    printf("regime,kind,rate,n_meas,mean_ns,p99_ns,gbps,mean_wall_ns\n");
+    printf("[MoE-serving] regime=%s T=%d d=%d hidden=%d E=%d cap=%d | grid=%d N=%d warmup=%d | "
+           "n_lat=%zu n_bw=%zu n_rates=%zu\n",
+           regime.c_str(), T, d, hidden, E, cap, physical_grid_size, N, WARMUP_PASSES,
+           lat_idx.size(), bw_idx.size(), sizeof(PING_RATES) / sizeof(PING_RATES[0]));
+    printf("regime,kind,src_xcd,dst_hbm,bpx,rate,n_meas,mean_ns,p99_ns,gbps,mean_wall_ns\n");
 
     struct Cond { const char* kind; double rate; int plan_idx; };
     vector<Cond> conds;
+#if !(DISABLE_BASELINE)
     conds.push_back({ "baseline", 0.0, -1 });
-    for (double r : PING_RATES) conds.push_back({ "latency",   r, PLAN_LAT });
-    for (double r : PING_RATES) conds.push_back({ "bandwidth", r, PLAN_BW  });
+#endif
+    for (int idx : lat_idx) for (double r : PING_RATES) conds.push_back({ "latency",   r, idx });
+    for (int idx : bw_idx)  for (double r : PING_RATES) conds.push_back({ "bandwidth", r, idx });
 
     for (const Cond& c : conds) {
         const int period = (c.rate > 0.0) ? (int)lround(1.0 / c.rate) : 0;
         MeasurementSeries span, wall;
         for (int i = 0; i < N; i++) {
             bool is_ping = (c.plan_idx >= 0) && (period > 0) && (i % period == 0);
-            int plan_idx = is_ping ? c.plan_idx : PLAN_NULL;
+            int plan_idx = is_ping ? c.plan_idx : NULL_IDX;
             double w = 0.0;
             double ns = run_pass(plan_idx, &w);
             if (i >= WARMUP_PASSES) { span.add(ns); wall.add(w); }
@@ -348,8 +405,10 @@ int main(int argc, char **argv) {
         double mean_ns = span.value();
         double p99_ns  = span.getPercentile(0.99);
         double gbps    = (double)B_ffn1 / mean_ns; // bytes/ns = GB/s
-        printf("%s,%s,%.2f,%d,%.1f,%.1f,%.2f,%.1f\n",
-               regime.c_str(), c.kind, c.rate, (int)(N - WARMUP_PASSES),
+        int    src = -1, hbm = -1; size_t bpx = 0;
+        if (c.plan_idx >= 0) { src = h_plan[c.plan_idx].src_xcd; hbm = h_plan[c.plan_idx].dst_hbm; bpx = h_plan[c.plan_idx].bpx; }
+        printf("%s,%s,%d,%d,%zu,%.2f,%d,%.1f,%.1f,%.2f,%.1f\n",
+               regime.c_str(), c.kind, src, hbm, bpx, c.rate, (int)(N - WARMUP_PASSES),
                mean_ns, p99_ns, gbps, wall.value());
         fflush(stdout);
     }
