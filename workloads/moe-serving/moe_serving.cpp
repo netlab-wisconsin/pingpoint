@@ -92,11 +92,22 @@ __global__ void fused_serving_kernel(TargetFn target_fn, const TargetArgs* __res
 
 int main(int argc, char **argv) {
 
-    // argv: [1]=regime(prefill|decode)  [2]=N passes  [3]=bpx
+    // argv: [1]=regime(prefill|decode)  [2]=N passes
     string regime = (argc > 1) ? argv[1] : "prefill";
     const int N        = (argc > 2) ? atoi(argv[2]) : N_PASSES_DEFAULT;
     const bool is_decode = (regime == "decode");
     const int T = is_decode ? DECODE_T : PREFILL_T;
+
+    // Optional sharding of the bandwidth plan set across processes/GPUs: this process runs only
+    // its contiguous slice of the built bandwidth plans (MOE_BW_SHARD of MOE_BW_NSHARD). Unset =>
+    // single shard (all bandwidth plans). Latency + baseline conditions are not sharded.
+    const char* ns_env = getenv("MOE_BW_NSHARD");
+    const char* sh_env = getenv("MOE_BW_SHARD");
+    const int bw_nshard = (ns_env && atoi(ns_env) > 0) ? atoi(ns_env) : 1;
+    const int bw_shard  = sh_env ? atoi(sh_env) : 0;
+    if (bw_shard < 0 || bw_shard >= bw_nshard) {
+        fprintf(stderr, "MOE_BW_SHARD=%d out of range [0,%d)\n", bw_shard, bw_nshard); return 1;
+    }
 
     unsigned int clock = getGPUClock();
 
@@ -383,9 +394,10 @@ int main(int argc, char **argv) {
     // SERVING-LOOP SWEEP
     // =============================================================================================
     printf("[MoE-serving] regime=%s T=%d d=%d hidden=%d E=%d cap=%d | grid=%d N=%d warmup=%d | "
-           "n_lat=%zu n_bw=%zu n_rates=%zu\n",
+           "n_lat=%zu n_bw=%zu (shard %d/%d) n_rates=%zu\n",
            regime.c_str(), T, d, hidden, E, cap, physical_grid_size, N, WARMUP_PASSES,
-           lat_idx.size(), bw_idx.size(), sizeof(PING_RATES) / sizeof(PING_RATES[0]));
+           lat_idx.size(), bw_idx.size(), bw_shard, bw_nshard,
+           sizeof(PING_RATES) / sizeof(PING_RATES[0]));
     printf("regime,kind,src_xcd,dst_hbm,bpx,rate,n_meas,mean_ns,p99_ns,gbps,mean_wall_ns\n");
 
     struct Cond { const char* kind; double rate; int plan_idx; };
@@ -393,8 +405,12 @@ int main(int argc, char **argv) {
 #if !(DISABLE_BASELINE)
     conds.push_back({ "baseline", 0.0, -1 });
 #endif
-    for (int idx : lat_idx) for (double r : PING_RATES) conds.push_back({ "latency",   r, idx });
-    for (int idx : bw_idx)  for (double r : PING_RATES) conds.push_back({ "bandwidth", r, idx });
+    for (int idx : lat_idx) for (double r : PING_RATES) conds.push_back({ "latency", r, idx });
+    // this process's contiguous slice of the bandwidth plans
+    const size_t bw_lo = bw_idx.size() * (size_t)bw_shard       / (size_t)bw_nshard;
+    const size_t bw_hi = bw_idx.size() * (size_t)(bw_shard + 1) / (size_t)bw_nshard;
+    for (size_t j = bw_lo; j < bw_hi; j++)
+        for (double r : PING_RATES) conds.push_back({ "bandwidth", r, bw_idx[j] });
 
     for (const Cond& c : conds) {
         const int period = (c.rate > 0.0) ? (int)lround(1.0 / c.rate) : 0;
