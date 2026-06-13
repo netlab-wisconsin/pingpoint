@@ -15,14 +15,18 @@
 #define DECODE_T    256    // few  tokens/expert  -> memory-bound
 
 // Serving-loop knobs (overridable via argv)
-#define N_PASSES_DEFAULT 60
-#define WARMUP_PASSES    10
-#define BPX_DEFAULT      8
+#define N_PASSES_DEFAULT 51
+#define WARMUP_PASSES    1
 
 // Baseline / Ping plan enables
 #define DISABLE_BASELINE 0
+// Guarded so a build can override via -DDISABLE_K{1,2}_PLANS=1 (see scripts/).
+#ifndef DISABLE_K1_PLANS
 #define DISABLE_K1_PLANS 0
+#endif
+#ifndef DISABLE_K2_PLANS
 #define DISABLE_K2_PLANS 0
+#endif
 
 // Ping lengths: must outlast the target (see moe_serving.cpp header note).
 #define PING_ITERS_K1 (1 << 23)

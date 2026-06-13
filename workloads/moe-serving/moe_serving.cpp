@@ -95,7 +95,6 @@ int main(int argc, char **argv) {
     // argv: [1]=regime(prefill|decode)  [2]=N passes  [3]=bpx
     string regime = (argc > 1) ? argv[1] : "prefill";
     const int N        = (argc > 2) ? atoi(argv[2]) : N_PASSES_DEFAULT;
-    const int bpx_bw   = (argc > 3) ? atoi(argv[3]) : BPX_DEFAULT;
     const bool is_decode = (regime == "decode");
     const int T = is_decode ? DECODE_T : PREFILL_T;
 
@@ -281,7 +280,9 @@ int main(int argc, char **argv) {
             lat_idx.push_back(add_plan(make_lat(x, v)));
 #else
     // --- customize latency (src_xcd, dst_hbm) pairs here ---
-    lat_idx.push_back(add_plan(make_lat(0, 0)));
+    // src_xcd 0 -> every HBM (0..7)
+    for (int v = 0; v < HBM_NUM; v++)
+        lat_idx.push_back(add_plan(make_lat(0, v)));
 #endif
 #endif
 
@@ -293,7 +294,10 @@ int main(int argc, char **argv) {
                 bw_idx.push_back(add_plan(make_bw(x, v, n_cu)));
 #else
     // --- customize bandwidth (src_xcd, dst_hbm, #active-CU) triples here ---
-    bw_idx.push_back(add_plan(make_bw(0, 0, bpx_bw)));
+    // src_xcd 0 -> every HBM (0..7) x every #active-CU in BW_ACTIVE_CUS (1..16)
+    for (int v = 0; v < HBM_NUM; v++)
+        for (int n_cu : BW_ACTIVE_CUS)
+            bw_idx.push_back(add_plan(make_bw(0, v, n_cu)));
 #endif
 #endif
 
