@@ -9,13 +9,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ="$(cd "$HERE/.." && pwd)"
 OUT="${WORK:?set WORK}/ici-workspace/sigcomm-exp/revision/overhead/raw"
-BIN="$PROJ/bin/moe_serving"
+BIN="$PROJ/bin/moe_serving_bw"
 NGPU="${NGPU:-8}"
 mkdir -p "$OUT"
-
-cd "$PROJ"
-make clean
-make CCFLAGS="-DDISABLE_K1_PLANS=1 -DDISABLE_K2_PLANS=0"
+[ -x "$BIN" ] || { echo "build first: scripts/make_serving_e1_bw.sh"; exit 1; }
 
 for regime in prefill decode; do
     echo "=== regime=$regime : launching $NGPU GPU shards ==="
