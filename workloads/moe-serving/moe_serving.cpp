@@ -224,15 +224,11 @@ int main(int argc, char **argv) {
 #endif // !(DISABLE_K2_PLANS)
 
     // =============================================================================================
-    // GRID CONFIG (persistent cooperative grid: 1 block / CU, rounded to XCD_NUM)
+    // GRID CONFIG (persistent cooperative grid, 1 block / CU)
+    //   target = top TARGET_CUS_PER_XCD CUs/XCD (fixed); ping = bpx low CUs/XCD on top.
+    //   per-pass grid = (TARGET_CUS_PER_XCD + bpx) * XCD_NUM (computed in run_pass).
     // =============================================================================================
-    int physical_grid_size;
-    {
-        const int num_sms = CU_NUM * XCD_NUM;
-        const int target_physical_blocks = 1 * num_sms;
-        physical_grid_size = (target_physical_blocks / XCD_NUM) * XCD_NUM;
-        if (physical_grid_size < XCD_NUM) physical_grid_size = XCD_NUM;
-    }
+    const int max_grid_blocks = CU_NUM * XCD_NUM; // upper bound (target + max ping); for sink size
     // =============================================================================================
     // BUILD PING PLANS
     //   index 0 = null plan (bpx=0): no ping, full grid, used for non-ping passes.
@@ -244,7 +240,7 @@ int main(int argc, char **argv) {
     size_t max_iterclk = 1;
 
     float* bw_sink = nullptr;
-    gpuErrchk(hipMalloc(&bw_sink, sizeof(float) * (size_t)TARGET_BLOCKDIM_X * physical_grid_size));
+    gpuErrchk(hipMalloc(&bw_sink, sizeof(float) * (size_t)TARGET_BLOCKDIM_X * max_grid_blocks));
 
     auto add_plan = [&](ppnt::PingSpec p) -> int {
         int idx = (int)h_plan.size();
@@ -312,6 +308,14 @@ int main(int argc, char **argv) {
 #endif
 #endif
 
+    // target + ping must fit within one XCD's CUs
+    for (const auto& p : h_plan)
+        if (TARGET_CUS_PER_XCD + (int)p.bpx > CU_NUM) {
+            fprintf(stderr, "TARGET_CUS_PER_XCD(%d) + bpx(%zu) > CU_NUM(%d)\n",
+                    TARGET_CUS_PER_XCD, p.bpx, CU_NUM);
+            return 1;
+        }
+
     // Single shared iterClk scratch. The ping kernels (k1/k2) write per-iteration cycle counts
     // into this buffer, but moe-serving never reads it (our metric is the target's clock span,
     // d_target_dur, not the ping's own timing). Since passes run one plan at a time and are
@@ -369,6 +373,10 @@ int main(int argc, char **argv) {
         static const uint64_t zero = 0;
         gpuErrchk(hipMemcpy(d_target_dur, &zero, sizeof(uint64_t), hipMemcpyHostToDevice));
 
+        // grid = target (TARGET_CUS_PER_XCD) + ping (bpx) blocks per XCD; target count is fixed.
+        const int bpx = (int)h_plan[plan_idx].bpx;
+        const int grid_blocks = (TARGET_CUS_PER_XCD + bpx) * XCD_NUM;
+
         void* kargs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan[plan_idx],
                           (void*)&d_target_dur, (void*)&d_iterclk_scratch };
 
@@ -377,7 +385,7 @@ int main(int argc, char **argv) {
         gpuErrchk(hipEventRecord(ev_s, stream));
         gpuErrchk(hipLaunchCooperativeKernel(
             (void*)fused_serving_kernel<Gemm1TargetFn, Gemm1Args>,
-            dim3(physical_grid_size), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
+            dim3(grid_blocks), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
         gpuErrchk(hipEventRecord(ev_e, stream));
         gpuErrchk(hipStreamSynchronize(stream));
 
@@ -393,9 +401,9 @@ int main(int argc, char **argv) {
     // =============================================================================================
     // SERVING-LOOP SWEEP
     // =============================================================================================
-    printf("[MoE-serving] regime=%s T=%d d=%d hidden=%d E=%d cap=%d | grid=%d N=%d warmup=%d | "
+    printf("[MoE-serving] regime=%s T=%d d=%d hidden=%d E=%d cap=%d | target_cu/xcd=%d N=%d warmup=%d | "
            "n_lat=%zu n_bw=%zu (shard %d/%d) n_rates=%zu\n",
-           regime.c_str(), T, d, hidden, E, cap, physical_grid_size, N, WARMUP_PASSES,
+           regime.c_str(), T, d, hidden, E, cap, TARGET_CUS_PER_XCD, N, WARMUP_PASSES,
            lat_idx.size(), bw_idx.size(), bw_shard, bw_nshard,
            sizeof(PING_RATES) / sizeof(PING_RATES[0]));
     printf("regime,kind,src_xcd,dst_hbm,bpx,rate,n_meas,mean_ns,p99_ns,gbps,mean_wall_ns\n");

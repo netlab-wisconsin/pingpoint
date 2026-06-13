@@ -8,6 +8,13 @@
 #define DEBUG_LEVEL 1
 #define TARGET_BLOCKDIM_X (1024)
 
+// Per-XCD CU budget for the TARGET kernel. The target always runs on the top
+// TARGET_CUS_PER_XCD CUs of each XCD (constant, independent of the ping), and a ping reserves its
+// bpx (or 1, latency) CUs in the low slots on top of that. Launch grid = (TARGET_CUS_PER_XCD +
+// bpx) * XCD_NUM, so the target's CU count never shrinks with bpx. Requires
+// TARGET_CUS_PER_XCD + max(bpx) <= CU_NUM (16 + 16 <= 36).
+#define TARGET_CUS_PER_XCD 16
+
 // Model / regime knobs
 #define D_MODEL     4096
 #define N_EXPERT    8
