@@ -1,9 +1,9 @@
 // =============================================================================================
 // bw-ping-fidelity (E2): see bw_fidelity.h for the experiment description.
 //
-// Output: CSV  bpx,window,throttle,target_gbps,probe_gbps,sum_gbps
+// Output: CSV  bpx,window,thr_cyc,target_gbps,probe_gbps,sum_gbps
 //   - one block per row of (bpx, window); replay the same target schedule across bpx=1..16.
-//   - the window(s) where throttle is largest (target near-idle) give the path peak (probe owns it).
+//   - the window(s) where thr_cyc is largest (target near-idle) give the path peak (probe owns it).
 //   - fidelity check (offline): probe_gbps ~= peak - target_gbps, and how that tightens with bpx.
 // =============================================================================================
 
@@ -35,7 +35,7 @@ __global__ void bw_fidelity_kernel(
     uint64_t* p0, uint64_t* p1, uint64_t* p2, uint64_t* p3, size_t n_probe_chunks,
     uint64_t* t0a, uint64_t* t1, uint64_t* t2, uint64_t* t3, size_t n_target_chunks,
     int n_target_cus, int bpx, int W, uint64_t window_cycles,
-    const int* __restrict__ throttle,
+    const int* __restrict__ thr_cyc,
     uint64_t* __restrict__ probe_cnt,   // [bpx * W]
     uint64_t* __restrict__ target_cnt,  // [n_target_cus * W]
     float* __restrict__ sink)
@@ -63,11 +63,14 @@ __global__ void bw_fidelity_kernel(
     else           { c0 = p0;  c1 = p1;  c2 = p2;  c3 = p3;  nch = n_probe_chunks; }
     uint64_t* outcnt = is_target ? target_cnt : probe_cnt;
 
-    const int chunk_elems = CHUNK_SIZE / 16;       // float4 lanes per chunk
-    const int off = tid % chunk_elems;
+    const int chunk_elems = CHUNK_SIZE / 16;          // float4 lanes per chunk (128)
+    const int groups = BLOCKDIM_X / chunk_elems;      // chunks read per array per iter (8)
+    const int g   = tid / chunk_elems;                // which chunk this thread reads
+    const int off = tid % chunk_elems;                // lane within that chunk
 
     float s = 0.f;
-    int cur_w = 0, thr = 0;
+    int cur_w = 0;
+    int thr = is_target ? thr_cyc[0] : 0;             // steady per-iter delay (cycles)
     uint64_t cnt = 0, iter = 0;
 
     for (;;) {
@@ -77,11 +80,12 @@ __global__ void bw_fidelity_kernel(
         if (w != cur_w) {
             if (tid == 0) outcnt[rlocal * W + cur_w] = cnt;
             cur_w = w; cnt = 0;
-            thr = is_target ? throttle[w] : 0;
+            thr = is_target ? thr_cyc[w] : 0;
         }
 
-        // stream one iteration: 4 independent float4 loads from 4 arrays (ILP for BW saturation)
-        const size_t ci = (iter * (size_t)n_tbs_in_xcd + tbid_in_xcd) % nch;
+        // one iteration: each thread issues 4 independent float4 loads (64B) from distinct chunks
+        const size_t base = (iter * (size_t)n_tbs_in_xcd + tbid_in_xcd) * groups + g;
+        const size_t ci = base % nch;
         float4 a0 = reinterpret_cast<float4*>(c0[ci])[off];
         float4 a1 = reinterpret_cast<float4*>(c1[ci])[off];
         float4 a2 = reinterpret_cast<float4*>(c2[ci])[off];
@@ -89,7 +93,11 @@ __global__ void bw_fidelity_kernel(
         s += a0.x + a1.x + a2.x + a3.x;
         cnt++; iter++;
 
-        for (volatile int d = 0; d < thr; d++) { /* throttle target */ }
+        // steady throttle: wait `thr` cycles between iterations (target only; bounded < window)
+        if (thr > 0) {
+            const uint64_t st = __builtin_readcyclecounter();
+            while (__builtin_readcyclecounter() - st < (uint64_t)thr) { }
+        }
     }
     if (tid == 0) outcnt[rlocal * W + cur_w] = cnt;
     if (tid == 0 && s == 1.2345678e30f) sink[bid] = s;   // keep loads live
@@ -157,16 +165,17 @@ int main(int argc, char** argv) {
     const size_t n_target_chunks = *min_element(nt, nt + 4);
 
     // ---------------------------------------------------------------------------------------------
-    // Target throttle staircase: N_LEVELS plateaus, delay THROTTLE_MAX -> 0 (idle -> full intensity)
+    // Target throttle staircase: N_LEVELS plateaus, delay THR_MAX_CYCLES -> 0 cycles
+    // (lowest target BW -> full intensity), so target BW ramps up across the windows.
     // ---------------------------------------------------------------------------------------------
-    vector<int> h_throttle(N_WINDOWS);
+    vector<int> h_thr(N_WINDOWS);
     for (int w = 0; w < N_WINDOWS; w++) {
-        int level = w * N_LEVELS / N_WINDOWS;                       // 0..N_LEVELS-1
-        h_throttle[w] = THROTTLE_MAX * (N_LEVELS - 1 - level) / (N_LEVELS - 1);
+        int level = w * N_LEVELS / N_WINDOWS;                          // 0..N_LEVELS-1
+        h_thr[w] = THR_MAX_CYCLES * (N_LEVELS - 1 - level) / (N_LEVELS - 1);
     }
-    int* d_throttle = nullptr;
-    gpuErrchk(hipMalloc(&d_throttle, sizeof(int) * N_WINDOWS));
-    gpuErrchk(hipMemcpy(d_throttle, h_throttle.data(), sizeof(int) * N_WINDOWS, hipMemcpyHostToDevice));
+    int* d_thr = nullptr;
+    gpuErrchk(hipMalloc(&d_thr, sizeof(int) * N_WINDOWS));
+    gpuErrchk(hipMemcpy(d_thr, h_thr.data(), sizeof(int) * N_WINDOWS, hipMemcpyHostToDevice));
 
     // output counters + dce sink
     const int max_blocks = (N_TARGET_CUS + 16) * XCD_NUM;
@@ -179,7 +188,7 @@ int main(int argc, char** argv) {
            "n_probe_chunks=%zu n_target_chunks=%zu clock=%uMHz\n",
            SRC_XCD, DST_HBM, N_TARGET_CUS, N_WINDOWS, WINDOW_US,
            n_probe_chunks, n_target_chunks, clock);
-    printf("bpx,window,throttle,target_gbps,probe_gbps,sum_gbps\n");
+    printf("bpx,window,thr_cyc,target_gbps,probe_gbps,sum_gbps\n");
 
     hipStream_t stream; gpuErrchk(hipStreamCreate(&stream));
     vector<uint64_t> h_probe(16 * N_WINDOWS), h_target(N_TARGET_CUS * N_WINDOWS);
@@ -194,7 +203,7 @@ int main(int argc, char** argv) {
         uint64_t wc = window_cycles;
         void* kargs[] = { &p0,&p1,&p2,&p3,(void*)&n_probe_chunks,
                           &t0a,&t1,&t2,&t3,(void*)&n_target_chunks,
-                          &ntc,&bpxv,&W,&wc,&d_throttle,&d_probe_cnt,&d_target_cnt,&d_sink };
+                          &ntc,&bpxv,&W,&wc,&d_thr,&d_probe_cnt,&d_target_cnt,&d_sink };
         gpuErrchk(hipLaunchCooperativeKernel((void*)bw_fidelity_kernel,
                   dim3(grid_blocks), dim3(BLOCKDIM_X), kargs, 0, stream));
         gpuErrchk(hipStreamSynchronize(stream));
@@ -209,7 +218,7 @@ int main(int argc, char** argv) {
             for (int r = 0; r < bpx; r++)          pi += h_probe[r * N_WINDOWS + w];
             double tgt_gbps = (double)ti * bytes_per_block_iter / window_sec / 1e9;
             double prb_gbps = (double)pi * bytes_per_block_iter / window_sec / 1e9;
-            printf("%d,%d,%d,%.2f,%.2f,%.2f\n", bpx, w, h_throttle[w],
+            printf("%d,%d,%d,%.2f,%.2f,%.2f\n", bpx, w, h_thr[w],
                    tgt_gbps, prb_gbps, tgt_gbps + prb_gbps);
         }
         fflush(stdout);

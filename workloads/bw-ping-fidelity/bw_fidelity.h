@@ -30,10 +30,11 @@
 #define N_PROBE_DATAS 4
 #define K2_N_PAGES    1024    // pages per array (x PAGE_SIZE=2MB) => 2GB/array; ~256MB/array on DST_HBM
 
-// Target throttle staircase: N_LEVELS plateaus, delay decreasing from THROTTLE_MAX (near-idle) to
-// 0 (full intensity). Delay units are spin iterations between streamed chunks (tune empirically).
-#define N_LEVELS     8
-#define THROTTLE_MAX 4096
+// Target steady per-iteration throttle: clock CYCLES of delay between streamed iterations.
+// Staircase of N_LEVELS plateaus, delay THR_MAX_CYCLES (lowest target BW) -> 0 (full intensity).
+// Must be < window_cycles (= WINDOW_US * clock_MHz) so a single iteration never spans a window.
+#define N_LEVELS       8
+#define THR_MAX_CYCLES 2000
 
 // Bandwidth probe #active CUs (bpx) swept.
 inline constexpr int BW_ACTIVE_CUS[] = { 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16 };

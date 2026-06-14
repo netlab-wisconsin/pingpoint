@@ -332,7 +332,9 @@ int main(int argc, char **argv) {
     // FFN1 (Gemm1) TARGET DATA
     // =============================================================================================
     const int d = D_MODEL, E = N_EXPERT, hidden = 4 * d;
-    const int cap = (T + E - 1) / E + 64;
+    // decode: cap tracks tokens/expert (no floor) so weights stream with ~no reuse (memory-bound);
+    // prefill: +64 headroom as before.
+    const int cap = (T + E - 1) / E + (is_decode ? 0 : 64);
 
     // uniform token distribution across experts (E1; flip to hot-expert for E3)
     vector<int> h_cnt(E, 0);

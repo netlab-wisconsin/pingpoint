@@ -19,7 +19,7 @@
 #define D_MODEL     4096
 #define N_EXPERT    8
 #define PREFILL_T   8192   // many tokens/expert  -> compute-bound
-#define DECODE_T    256    // few  tokens/expert  -> memory-bound
+#define DECODE_T    8    // few  tokens/expert  -> memory-bound
 
 // Serving-loop knobs (overridable via argv)
 #define N_PASSES_DEFAULT 51
