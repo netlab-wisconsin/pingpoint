@@ -90,6 +90,36 @@ __global__ void fused_serving_kernel(TargetFn target_fn, const TargetArgs* __res
     }
 }
 
+// Decode-path FFN1 target: single token/expert GEMV (cap=1, cnt[e]=1). Unlike Gemm1 (which tiles
+// 32x32 over hidden x token and wastes 31/32 thread-rows when cap<32), this parallelizes over the
+// OUTPUT columns (E x hidden), one thread per output reducing over d. Each thread streams a distinct
+// column of W1[e] with coalesced, high-MLP loads (reuse ~1) -> memory-bandwidth-bound, as real
+// autoregressive decode is. Uses the same Gemm1Args/layout (token = row 0 of each expert).
+struct DecodeGemvTargetFn {
+    __device__ __forceinline__
+    void operator()(const Gemm1Args* __restrict__ a,
+                    int bid, int tid, int gridDimX, int blockDimX, int n_ppnt_tbs_in_xcd) const
+    {
+        int n_tbs_in_xcd = gridDimX / XCD_NUM;
+        int logical_bid = ppnt::physical_to_logical_bid(bid, n_tbs_in_xcd, n_ppnt_tbs_in_xcd);
+        int logical_grid_size = (n_tbs_in_xcd - (int)n_ppnt_tbs_in_xcd) * XCD_NUM;
+
+        const size_t total_outputs = (size_t)a->E * a->hidden;          // 1 token/expert
+        const size_t total_threads = (size_t)logical_grid_size * blockDimX;
+        const size_t start = (size_t)logical_bid * blockDimX + tid;
+
+        for (size_t oid = start; oid < total_outputs; oid += total_threads) {
+            const int e = (int)(oid / a->hidden);
+            const int j = (int)(oid % a->hidden);
+            const float* x = a->Xexp + (size_t)(e * a->cap) * a->d;     // token row 0 of expert e
+            const float* w = a->W1   + (size_t)e * a->d * a->hidden;
+            float acc = 0.f;
+            for (int k = 0; k < a->d; k++) acc += x[k] * w[(size_t)k * a->hidden + j];
+            a->Tmp[(size_t)(e * a->cap) * a->hidden + j] = acc;
+        }
+    }
+};
+
 int main(int argc, char **argv) {
 
     // argv: [1]=regime(prefill|decode)  [2]=N passes
@@ -362,7 +392,9 @@ int main(int argc, char **argv) {
     Gemm1Args* d_args = nullptr;
     gpuErrchk(hipMalloc(&d_args, sizeof(Gemm1Args)));
     gpuErrchk(hipMemcpy(d_args, &h_args, sizeof(Gemm1Args), hipMemcpyHostToDevice));
-    Gemm1TargetFn fn{};
+    // prefill -> token-tiled GEMM (compute-bound); decode -> single-token GEMV (memory-bound)
+    Gemm1TargetFn       fn_prefill{};
+    DecodeGemvTargetFn  fn_decode{};
 
     // bytes touched by FFN1 (read Xexp + read W1 + write Tmp); effective tokens = sum cnt = T
     const size_t B_ffn1 = sizeof(float) * ((size_t)T * d + (size_t)E * d * hidden + (size_t)T * hidden);
@@ -379,15 +411,23 @@ int main(int argc, char **argv) {
         const int bpx = (int)h_plan[plan_idx].bpx;
         const int grid_blocks = (TARGET_CUS_PER_XCD + bpx) * XCD_NUM;
 
-        void* kargs[] = { (void*)&fn, (void*)&d_args, (void*)&d_plan[plan_idx],
-                          (void*)&d_target_dur, (void*)&d_iterclk_scratch };
+        void* kargs_prefill[] = { (void*)&fn_prefill, (void*)&d_args, (void*)&d_plan[plan_idx],
+                                  (void*)&d_target_dur, (void*)&d_iterclk_scratch };
+        void* kargs_decode[]  = { (void*)&fn_decode,  (void*)&d_args, (void*)&d_plan[plan_idx],
+                                  (void*)&d_target_dur, (void*)&d_iterclk_scratch };
 
         hipEvent_t ev_s, ev_e;
         gpuErrchk(hipEventCreate(&ev_s)); gpuErrchk(hipEventCreate(&ev_e));
         gpuErrchk(hipEventRecord(ev_s, stream));
-        gpuErrchk(hipLaunchCooperativeKernel(
-            (void*)fused_serving_kernel<Gemm1TargetFn, Gemm1Args>,
-            dim3(grid_blocks), dim3(TARGET_BLOCKDIM_X), kargs, 0, stream));
+        if (is_decode) {
+            gpuErrchk(hipLaunchCooperativeKernel(
+                (void*)fused_serving_kernel<DecodeGemvTargetFn, Gemm1Args>,
+                dim3(grid_blocks), dim3(TARGET_BLOCKDIM_X), kargs_decode, 0, stream));
+        } else {
+            gpuErrchk(hipLaunchCooperativeKernel(
+                (void*)fused_serving_kernel<Gemm1TargetFn, Gemm1Args>,
+                dim3(grid_blocks), dim3(TARGET_BLOCKDIM_X), kargs_prefill, 0, stream));
+        }
         gpuErrchk(hipEventRecord(ev_e, stream));
         gpuErrchk(hipStreamSynchronize(stream));
 
