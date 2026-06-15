@@ -1,4 +1,88 @@
-# E3 Initial Results
+# E3 Results
+
+## Current Equal-Phase Experiment
+
+Final run:
+
+```text
+/work1/sinclair/junyeol/ici-workspace/sigcomm-exp/revision/anomaly-moe/raw/
+  anomaly_moe_n64_a1_16_16_a2_48_16_first14_second_bpx10_i4.out
+```
+
+The trace contains four equal 16-request phases: normal, first anomaly, recovery/normal, and second
+anomaly. Both anomalies triggered after one request.
+
+| Encounter | BW schedule | Ping requests / anomaly | Unique bpx | Informative | Mean pinged slowdown | Anomaly-window slowdown |
+|---|---|---:|---:|---:|---:|---:|
+| First anomaly | `{10,16,11,15,12,14,13}` twice | 14/16 (87.5%) | 7 | 100% | 56.785% | 49.791% |
+| Second anomaly | `bpx=10` every fourth request | 4/16 (25.0%) | 1 | 100% | 40.401% | 10.434% |
+
+The first anomaly spends nearly its entire post-detection window performing broad diagnosis. The
+second uses the learned `bpx=10` probe periodically, reducing anomaly-window target overhead by
+79.0% relative to the first anomaly.
+
+Overall adaptive target slowdown was `15.098%`, compared with `127.636%` for always-on BW pings.
+Always-on latency target slowdown was effectively zero (`-0.039%` measured).
+
+An independent repeat preserved 100% informative coverage and the exact 4/16 second-anomaly
+schedule. Its first anomaly needed three requests to confirm detection, so 13 broad-sweep pings ran
+inside the anomaly and the final ping ran on the first recovery request. This is a consequence of
+between-request reactive control: strict 14/16 placement requires confirmation by the second
+anomaly request.
+
+Plot-ready output:
+
+```text
+/work1/sinclair/junyeol/ici-workspace/sigcomm-exp/revision/anomaly-moe/parsed/
+  anomaly_moe_n64_a1_16_16_a2_48_16_first14_second_bpx10_i4_timeseries.csv
+```
+
+## Previous Two-Anomaly Experiment
+
+Final run:
+
+```text
+/work1/sinclair/junyeol/ici-workspace/sigcomm-exp/revision/anomaly-moe/raw/
+  anomaly_moe_n200_a1_40_28_a2_100_60_r2_2.out
+```
+
+The trace contains identical hot-expert anomalies at requests `[40,68)` and `[100,160)`.
+Both encounters diagnose the selected path with the same mixed-order informative set
+`{10,16,11,15,12,14,13}`. The first diagnosis uses rate 1.0; the second uses exact deterministic
+rate 0.2. Each diagnosis stops after covering the full set once.
+
+### Adaptive Diagnosis Comparison
+
+| Encounter | Rate | Trigger delay | Completion span | BW pings | Unique bpx | Informative | Mean pinged slowdown | Anomaly-window slowdown |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| First | 1.0 | 1 request | 7 requests | 7 | 7 | 100% | 48.389% | 12.181% |
+| Second | 0.2 | 1 request | 35 requests | 7 | 7 | 100% | 48.810% | 5.829% |
+
+Lowering the rate does not make an individual BW ping cheaper: mean slowdown on pinged requests is
+nearly identical. It spreads the same diagnostic coverage across more requests, reducing the
+time-averaged anomaly-window overhead by 52.1% while increasing diagnosis completion time by 5x.
+
+### Policy Comparison
+
+| Policy | Mean target slowdown | Mean wall slowdown | BW duty cycle |
+|---|---:|---:|---:|
+| Target only | 0.000% | 0.000% | 0.0% |
+| Always-on latency | 0.003% | 0.230% | 0.0% |
+| Always-on BW, all paths | 122.419% | 106.676% | 100.0% |
+| Adaptive two-tier | 3.443% | 3.222% | 7.0% |
+
+Both anomalies triggered after one request and localized to cache complex 0. The controller re-armed
+during recovery and did not issue BW pings outside the two diagnosis episodes. All 14 adaptive BW
+measurements were informative.
+
+Plot-ready output:
+
+```text
+/work1/sinclair/junyeol/ici-workspace/sigcomm-exp/revision/anomaly-moe/parsed/
+  anomaly_moe_n200_a1_40_28_a2_100_60_r2_2_timeseries.csv
+```
+
+## Initial Single-Anomaly Results
 
 Final initial run:
 

@@ -19,19 +19,23 @@
 // One target block iteration streams 64 KiB. Work scales with routed token count.
 #define TARGET_BLOCK_ITERS_PER_TOKEN 128
 
-// Timeline defaults, overridable through command-line arguments and environment variables.
-#define DEFAULT_REQUESTS 120
-#define DEFAULT_ANOMALY_START 40
-#define DEFAULT_ANOMALY_LENGTH 24
+// Two identical anomaly encounters separated by a stable recovery interval.
+#define DEFAULT_REQUESTS 64
+#define DEFAULT_FIRST_ANOMALY_START 16
+#define DEFAULT_FIRST_ANOMALY_LENGTH 16
+#define DEFAULT_SECOND_ANOMALY_START 48
+#define DEFAULT_SECOND_ANOMALY_LENGTH 16
 #define DEFAULT_CALIBRATION_REQUESTS 30
 #define DEFAULT_WARMUP_REQUESTS 3
 
 // Detector/controller settings.
 #define DETECT_STREAK 2
 #define RESET_STREAK 3
-#define BW_BURST_REQUESTS 3
-#define DEFAULT_BW_BPX 10
-#define MIN_BW_BPX 1
+#define INFORMATIVE_BPX_COUNT 7
+#define FIRST_ANOMALY_PING_COUNT (INFORMATIVE_BPX_COUNT * 2)
+#define SECOND_ANOMALY_BPX 10
+#define SECOND_ANOMALY_PING_COUNT 4
+#define SECOND_ANOMALY_INTERVAL 4
 #define MAX_BW_BPX MAX_BW_CUS_PER_XCD
 #define MIN_PROBE_LOSS_FRAC 0.20
 #define MIN_PROBE_PEAK_FRAC 0.55
@@ -61,4 +65,3 @@ struct LatencyStats {
     uint64_t sum_sq_cycles;
     uint64_t max_cycles;
 };
-

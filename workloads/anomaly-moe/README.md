@@ -9,9 +9,14 @@ This benchmark prototypes adaptive two-tier monitoring for a path-localized deco
 - Cheap pointer-chase latency pings continuously measure every path.
 - A detector uses cross-path skew in normalized latency means:
   `max(path_mean / calibrated_path_mean) - median(path_mean / calibrated_path_mean)`.
-- Two consecutive detections agreeing on the same cache complex trigger a three-request
-  bandwidth-ping burst on the most affected path in that complex.
-- The controller latches the anomaly after diagnosis and does not repeatedly trigger until recovery.
+- The timeline contains two identical hot-expert anomalies separated by recovery.
+- Two consecutive strong detections trigger bandwidth diagnosis on the most affected path from the
+  second detection.
+- During the first anomaly, diagnosis covers `{10,16,11,15,12,14,13}` twice in deterministic
+  mixed order, filling the 14 requests remaining after detection.
+- During the second anomaly, diagnosis uses only `bpx=10`, immediately after detection and then
+  every fourth request, for four BW-ping requests in the 16-request anomaly window.
+- The controller latches after detection and does not repeatedly trigger until recovery.
 
 The existing `workloads/moe/k1.h` and `k2.h` home-identification logic is reused unchanged.
 Target, latency, and bandwidth pings have bounded lifetimes: all stop when the decode-FFN request
@@ -30,7 +35,22 @@ Four policies run over the same timeline:
 1. `baseline`: target only.
 2. `latency`: always-on latency pings.
 3. `always_bw`: latency and bandwidth pings always active on all paths.
-4. `adaptive`: always-on latency pings and reactive bandwidth diagnosis.
+4. `adaptive`: always-on latency pings and reactive bandwidth diagnosis, using full-rate diagnosis
+   on the first encounter and lower-rate diagnosis on the second.
+
+The default 64-request timeline contains four equal 16-request phases:
+
+- normal: requests `[0,16)`
+- first anomaly: `[16,32)`
+- recovery/normal: `[32,48)`
+- second anomaly: `[48,64)`
+
+The first anomaly represents intensive diagnosis across the full informative `bpx` set. The second
+represents a cheaper learned response that periodically checks the anomaly using only `bpx=10`.
+Because decisions occur between requests, the 14/16 first-anomaly layout assumes detection is
+confirmed by the second anomaly request. If confirmation takes longer, the remaining broad-sweep
+ping can occur during recovery; guaranteeing otherwise would require phase ground truth or
+within-request detection.
 
 Build and run:
 
@@ -42,14 +62,18 @@ scripts/run.sh
 Useful overrides:
 
 ```bash
-N_REQUESTS=120 ANOMALY_START=40 ANOMALY_LENGTH=24 ANOMALY_BW_BPX=10 scripts/run.sh
+N_REQUESTS=64 FIRST_ANOMALY_START=16 FIRST_ANOMALY_LENGTH=16 \
+  SECOND_ANOMALY_START=48 SECOND_ANOMALY_LENGTH=16 scripts/run.sh
 ANOMALY_CALIBRATION_REQUESTS=30 scripts/run.sh
 ```
 
 Summarize a raw output:
 
 ```bash
-scripts/summarize.py /work1/sinclair/junyeol/ici-workspace/sigcomm-exp/revision/anomaly-moe/raw/FILE.out
+scripts/summarize.py /work1/sinclair/junyeol/ici-workspace/sigcomm-exp/revision/anomaly-moe/raw/FILE.out \
+  /work1/sinclair/junyeol/ici-workspace/sigcomm-exp/revision/anomaly-moe/parsed/FILE_timeseries.csv
 ```
 
-`scripts/run.sh` also saves this summary under the result directory's `parsed/` subdirectory.
+`scripts/run.sh` saves both a summary and a plot-ready adaptive time series under `parsed/`. The
+time series directly reports matched-baseline target slowdown, detector score, triggers, BW-active
+requests, selected path, `bpx`, probe loss, and informativeness.
