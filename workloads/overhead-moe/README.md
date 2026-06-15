@@ -25,8 +25,14 @@ Build and run:
 ```bash
 scripts/build.sh
 scripts/run.sh
-scripts/summarize.py /path/to/overhead_moe_both_n50.out
+/work1/sinclair/junyeol/ici-workspace/sigcomm-exp/revision/overhead-moe/scripts/summarize.py \
+  /path/to/overhead_moe_both_n50.out [rate]
+/work1/sinclair/junyeol/ici-workspace/sigcomm-exp/revision/overhead-moe/scripts/parse_all_rates.sh
 ```
 
 `N_MEASURED` must be a positive multiple of 10. `REGIME` may be `prefill`, `decode`, or `both`.
 `OVERHEAD_BPX` and `OVERHEAD_RATE_TENTHS` optionally select one configuration for validation.
+Raw outputs are written under the result directory's `raw/` subdirectory. The relocated
+summarizer's optional `rate` is one of `0.1, 0.2, ..., 1.0` and defaults to `1.0`.
+`parse_all_rates.sh` writes one valid CSV table per rate under the result directory's `parsed/`
+subdirectory.

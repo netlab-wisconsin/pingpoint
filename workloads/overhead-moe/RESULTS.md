@@ -4,7 +4,7 @@ Final run:
 
 ```text
 /work1/sinclair/junyeol/ici-workspace/sigcomm-exp/revision/overhead-moe/
-  overhead_moe_final_both_n50.out
+  raw/overhead_moe_final_both_n50.out
 ```
 
 The run contains 50 paired baseline/workload requests for every combination of two target
@@ -62,5 +62,15 @@ Decode target slowdown is about 8.1x prefill slowdown over this informative rang
 Reproduce the integrity checks and rate-1.0 table with:
 
 ```bash
-scripts/summarize.py /work1/sinclair/junyeol/ici-workspace/sigcomm-exp/revision/overhead-moe/overhead_moe_final_both_n50.out
+/work1/sinclair/junyeol/ici-workspace/sigcomm-exp/revision/overhead-moe/scripts/summarize.py \
+  /work1/sinclair/junyeol/ici-workspace/sigcomm-exp/revision/overhead-moe/raw/overhead_moe_final_both_n50.out 1.0
+```
+
+Replace `1.0` with any rate from `0.1` through `1.0` to print that rate's workload-slowdown
+table.
+
+Generate all ten rate tables as CSV files under `parsed/` with:
+
+```bash
+/work1/sinclair/junyeol/ici-workspace/sigcomm-exp/revision/overhead-moe/scripts/parse_all_rates.sh
 ```
