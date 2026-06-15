@@ -35,5 +35,5 @@ inline constexpr int BW_ACTIVE_CUS[] = { 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16 
 
 // High-confidence inference requires observable probe suppression and enough solo probe reach.
 // This rejects weak pings that can slow down without filling the path residual headroom.
-#define MIN_PROBE_LOSS_FRAC 0.15
+#define MIN_PROBE_LOSS_FRAC 0.20
 #define MIN_PROBE_CAPACITY_FRAC 0.55
