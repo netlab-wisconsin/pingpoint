@@ -14,8 +14,8 @@ This benchmark prototypes adaptive two-tier monitoring for a path-localized deco
   second detection.
 - During the first anomaly, diagnosis covers `{10,16,11,15,12,14,13}` twice in deterministic
   mixed order, filling the 14 requests remaining after detection.
-- During the second anomaly, diagnosis uses only `bpx=10`, immediately after detection and then
-  every fourth request, for four BW-ping requests in the 16-request anomaly window.
+- During the second anomaly, diagnosis uses only `bpx=10` at full rate after detection, for a
+  14-request BW-ping burst.
 - The controller latches after detection and does not repeatedly trigger until recovery.
 
 The existing `workloads/moe/k1.h` and `k2.h` home-identification logic is reused unchanged.
@@ -25,6 +25,11 @@ completes. The grid shape and target CU budget remain fixed across all policies.
 The current prototype makes controller decisions on the host between request launches. Reported
 target and wall overhead measure the bounded GPU request kernels and exclude host-side controller
 processing. Moving the controller into a persistent GPU serving loop is future work.
+
+When a logical request needs both latency detection and BW diagnosis, the benchmark runs two
+non-overlapping GPU passes: target+latency first for `detector_score`, then target+BW for
+`target_slowdown_pct` and BW-ping loss. The parsed time series also reports
+`detector_target_slowdown_pct`, the target overhead from the latency-only detector pass.
 
 MI300X groups two XCDs per cache complex. ACN contention can make either path in the affected
 complex show the largest normalized latency skew, so E3 evaluates localization at cache-complex
@@ -38,19 +43,19 @@ Four policies run over the same timeline:
 4. `adaptive`: always-on latency pings and reactive bandwidth diagnosis, using full-rate diagnosis
    on the first encounter and lower-rate diagnosis on the second.
 
-The default 64-request timeline contains four equal 16-request phases:
+The default 70-request timeline contains five equal 14-request phases:
 
-- normal: requests `[0,16)`
-- first anomaly: `[16,32)`
-- recovery/normal: `[32,48)`
-- second anomaly: `[48,64)`
+- normal: requests `[0,14)`
+- first anomaly: `[14,28)`
+- recovery/normal: `[28,42)`
+- second anomaly: `[42,56)`
+- final recovery/normal: `[56,70)`
 
 The first anomaly represents intensive diagnosis across the full informative `bpx` set. The second
-represents a cheaper learned response that periodically checks the anomaly using only `bpx=10`.
-Because decisions occur between requests, the 14/16 first-anomaly layout assumes detection is
-confirmed by the second anomaly request. If confirmation takes longer, the remaining broad-sweep
-ping can occur during recovery; guaranteeing otherwise would require phase ground truth or
-within-request detection.
+represents full-rate learned monitoring using only `bpx=10`.
+Because decisions occur between requests, the 14-ping diagnosis bursts intentionally spill into
+recovery after a two-request detection delay. This lets the plot show BW-diagnosis overhead
+continuing as the latency-ping anomaly signal falls back.
 
 Build and run:
 
@@ -62,8 +67,8 @@ scripts/run.sh
 Useful overrides:
 
 ```bash
-N_REQUESTS=64 FIRST_ANOMALY_START=16 FIRST_ANOMALY_LENGTH=16 \
-  SECOND_ANOMALY_START=48 SECOND_ANOMALY_LENGTH=16 scripts/run.sh
+N_REQUESTS=70 FIRST_ANOMALY_START=14 FIRST_ANOMALY_LENGTH=14 \
+  SECOND_ANOMALY_START=42 SECOND_ANOMALY_LENGTH=14 scripts/run.sh
 ANOMALY_CALIBRATION_REQUESTS=30 scripts/run.sh
 ```
 

@@ -6,35 +6,43 @@ Final run:
 
 ```text
 /work1/sinclair/junyeol/ici-workspace/sigcomm-exp/revision/anomaly-moe/raw/
-  anomaly_moe_n64_a1_16_16_a2_48_16_first14_second_bpx10_i4.out
+  anomaly_moe_n70_a1_14_14_a2_42_14_first14_second_bpx10_full.out
 ```
 
-The trace contains four equal 16-request phases: normal, first anomaly, recovery/normal, and second
-anomaly. Both anomalies triggered after one request.
+The trace contains five equal 14-request phases: normal, first anomaly, recovery/normal, second
+anomaly, and final recovery/normal. Both anomalies triggered after one request.
+
+BW-active logical requests are split into two non-overlapping passes:
+
+1. target+latency, used for `detector_score` and `detector_target_slowdown_pct`
+2. target+BW, used for `target_slowdown_pct`, BW throughput, and BW-ping loss
 
 | Encounter | BW schedule | Ping requests / anomaly | Unique bpx | Informative | Mean pinged slowdown | Anomaly-window slowdown |
 |---|---|---:|---:|---:|---:|---:|
-| First anomaly | `{10,16,11,15,12,14,13}` twice | 14/16 (87.5%) | 7 | 100% | 56.785% | 49.791% |
-| Second anomaly | `bpx=10` every fourth request | 4/16 (25.0%) | 1 | 100% | 40.401% | 10.434% |
+| First anomaly | `{10,16,11,15,12,14,13}` twice | 12/14 (85.7%) | 7 | 100% | 70.199% | 64.512% |
+| Second anomaly | `bpx=10` full rate | 12/14 (85.7%) | 1 | 100% | 44.307% | 40.233% |
 
-The first anomaly spends nearly its entire post-detection window performing broad diagnosis. The
-second uses the learned `bpx=10` probe periodically, reducing anomaly-window target overhead by
-79.0% relative to the first anomaly.
+Both diagnoses issue 14 BW pings total. Because detection takes two requests, 12 pings fit inside
+the 14-request anomaly window and the final two pings spill into the following recovery phase.
+The second anomaly remains lower overhead because it uses only `bpx=10` instead of sweeping larger
+`bpx` values.
 
-Overall adaptive target slowdown was `15.098%`, compared with `127.636%` for always-on BW pings.
-Always-on latency target slowdown was effectively zero (`-0.039%` measured).
+Overall adaptive target slowdown was `22.891%`, compared with `142.087%` for always-on BW pings.
+The final recovery phase averaged `4.144%` target overhead because it contains the two spilled
+second-diagnosis BW pings.
 
-An independent repeat preserved 100% informative coverage and the exact 4/16 second-anomaly
-schedule. Its first anomaly needed three requests to confirm detection, so 13 broad-sweep pings ran
-inside the anomaly and the final ping ran on the first recovery request. This is a consequence of
-between-request reactive control: strict 14/16 placement requires confirmation by the second
-anomaly request.
+On BW-active requests, `target_slowdown_pct` is high while `detector_target_slowdown_pct` remains
+near zero; this confirms the detector score is measured without overlapping the BW ping.
+
+The spillover is visible at requests `28,29` after the first anomaly and `56,57` after the second
+anomaly. In this run, the latency-ping anomaly signal decays across those spillover requests rather
+than dropping instantly at the phase boundary.
 
 Plot-ready output:
 
 ```text
 /work1/sinclair/junyeol/ici-workspace/sigcomm-exp/revision/anomaly-moe/parsed/
-  anomaly_moe_n64_a1_16_16_a2_48_16_first14_second_bpx10_i4_timeseries.csv
+  anomaly_moe_n70_a1_14_14_a2_42_14_first14_second_bpx10_full_timeseries.csv
 ```
 
 ## Previous Two-Anomaly Experiment

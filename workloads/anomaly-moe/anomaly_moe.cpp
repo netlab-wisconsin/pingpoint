@@ -4,7 +4,7 @@
 // weight chunks home-identified to its corresponding HBM path. The request timeline keeps total
 // tokens fixed while twice routing 57/64 tokens to one expert. Always-on pointer-chase latency
 // pings detect each anomaly. The first diagnosis sweeps the informative bpx set twice; the second
-// diagnoses with bpx=10 every fourth request.
+// diagnoses with bpx=10 at full rate.
 
 #include <hip/hip_cooperative_groups.h>
 #include <hip/hip_runtime.h>
@@ -258,6 +258,7 @@ struct RequestRecord {
     int selected_path = -1;
     double score = 0.0;
     PassResult pass;
+    PassResult detector_pass;
     vector<double> probe_loss_pct;
     vector<int> informative;
 };
@@ -671,7 +672,14 @@ int main(int argc, char** argv) {
             record.diagnosis_step = decision.diagnosis_step;
             record.bw_bpx = active_bpx;
             record.selected_path = policy == "adaptive" ? decision.path : bw_path;
-            record.pass = run_pass(tokens, latency_enabled, bw_mode, bw_path, active_bpx);
+            const bool separate_latency_bw = latency_enabled && bw_mode != 0;
+            if (separate_latency_bw) {
+                record.detector_pass = run_pass(tokens, true, 0, -1, 0);
+                record.pass = run_pass(tokens, false, bw_mode, bw_path, active_bpx);
+            } else {
+                record.pass = run_pass(tokens, latency_enabled, bw_mode, bw_path, active_bpx);
+                record.detector_pass = record.pass;
+            }
             record.probe_loss_pct.assign(XCD_NUM, 0.0);
             record.informative.assign(XCD_NUM, 0);
             for (int x = 0; x < XCD_NUM; x++) {
@@ -686,7 +694,7 @@ int main(int argc, char** argv) {
             }
 
             if (policy == "latency" || policy == "adaptive") {
-                const auto [score, selected] = detector.score(record.pass);
+                const auto [score, selected] = detector.score(record.detector_pass);
                 record.score = score;
                 record.detector_positive = score >= detector.threshold;
                 if (policy == "adaptive") {
@@ -708,7 +716,8 @@ int main(int argc, char** argv) {
 
     const vector<RequestRecord>& baseline = records[0];
     printf("request,policy,request_idx,phase,ground_truth_anomaly,anomaly_id,hot_expert,"
-           "detector_score,detector_positive,triggered,encounter,diagnosis_step,"
+           "detector_score,detector_target_ns,detector_target_slowdown_pct,"
+           "detector_positive,triggered,encounter,diagnosis_step,"
            "selected_path,selected_cc,bw_active,bw_bpx,target_ns,matched_baseline_target_ns,"
            "target_slowdown_pct,wall_ns,selected_bw_gbps,selected_bw_loss_pct,"
            "selected_bw_informative,total_bw_gbps\n");
@@ -724,10 +733,13 @@ int main(int argc, char** argv) {
             const double matched_baseline = baseline[record.request].pass.target_ns;
             const double target_slowdown =
                 (record.pass.target_ns / matched_baseline - 1.0) * 100.0;
-            printf("request,%s,%d,%s,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%d,%d,"
+            const double detector_target_slowdown =
+                (record.detector_pass.target_ns / matched_baseline - 1.0) * 100.0;
+            printf("request,%s,%d,%s,%d,%d,%d,%.6f,%.2f,%.3f,%d,%d,%d,%d,%d,%d,%d,%d,"
                    "%.2f,%.2f,%.3f,%.2f,%.2f,%.2f,%d,%.2f\n",
                    record.policy.c_str(), record.request, record.phase.c_str(),
                    record.anomaly ? 1 : 0, record.anomaly_id, HOT_EXPERT, record.score,
+                   record.detector_pass.target_ns, detector_target_slowdown,
                    record.detector_positive ? 1 : 0, record.triggered ? 1 : 0,
                    record.encounter, record.diagnosis_step, record.selected_path,
                    record.selected_path >= 0 ? (int)get_cc(record.selected_path) : -1,
@@ -745,8 +757,8 @@ int main(int argc, char** argv) {
                 printf("path,%s,%d,%s,%d,%d,%d,%d,%.2f,%.3f,%.6f,%.3f,%.2f,%.2f,%d\n",
                        record.policy.c_str(), record.request, record.phase.c_str(),
                        record.anomaly ? 1 : 0, record.anomaly_id, record.bw_bpx, x,
-                       record.pass.target_xcd_ns[x], record.pass.latency_mean_ns[x],
-                       record.pass.latency_cv[x], record.pass.latency_max_ns[x],
+                       record.pass.target_xcd_ns[x], record.detector_pass.latency_mean_ns[x],
+                       record.detector_pass.latency_cv[x], record.detector_pass.latency_max_ns[x],
                        record.pass.bw_gbps[x], record.probe_loss_pct[x], record.informative[x]);
             }
         }
