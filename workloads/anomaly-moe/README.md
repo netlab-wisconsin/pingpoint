@@ -5,17 +5,17 @@ This benchmark prototypes adaptive two-tier monitoring for a path-localized deco
 - Eight experts are explicitly mapped one-to-one to the eight XCDs and corresponding HBM paths.
 - Every request contains 64 routed tokens.
 - Normal requests use the balanced distribution `{8,8,8,8,8,8,8,8}`.
-- Anomaly requests use `{57,1,1,1,1,1,1,1}`, making expert/XCD/HBM path 0 hot.
+- Anomaly requests use `{40,4,4,4,3,3,3,3}`, making expert/XCD/HBM path 0 hot.
 - Cheap pointer-chase latency pings continuously measure every path.
 - A detector uses cross-path skew in normalized latency means:
   `max(path_mean / calibrated_path_mean) - median(path_mean / calibrated_path_mean)`.
-- The timeline contains two identical hot-expert anomalies separated by recovery.
+- The default timeline contains 120 requests: 40 normal, 20 anomaly, 30 recovery, 10 anomaly,
+  and 20 final recovery.
 - Two consecutive strong detections trigger bandwidth diagnosis on the most affected path from the
   second detection.
-- During the first anomaly, diagnosis covers `{10,16,11,15,12,14,13}` twice in deterministic
-  mixed order, filling the 14 requests remaining after detection.
-- During the second anomaly, diagnosis uses only `bpx=10` at full rate after detection, for a
-  14-request BW-ping burst.
+- During the first anomaly, diagnosis covers `{10,16,11,15,12,14,13}` once in deterministic
+  mixed order after detection.
+- During the second anomaly, diagnosis covers `{10,11,12}` once after detection.
 - The controller latches after detection and does not repeatedly trigger until recovery.
 
 The existing `workloads/moe/k1.h` and `k2.h` home-identification logic is reused unchanged.
@@ -40,22 +40,20 @@ Four policies run over the same timeline:
 1. `baseline`: target only.
 2. `latency`: always-on latency pings.
 3. `always_bw`: latency and bandwidth pings always active on all paths.
-4. `adaptive`: always-on latency pings and reactive bandwidth diagnosis, using full-rate diagnosis
-   on the first encounter and lower-rate diagnosis on the second.
+4. `adaptive`: always-on latency pings and reactive bandwidth diagnosis, using a full informative
+   sweep on the first encounter and a narrower learned sweep on the second.
 
-The default 70-request timeline contains five equal 14-request phases:
+The default 120-request timeline contains:
 
-- normal: requests `[0,14)`
-- first anomaly: `[14,28)`
-- recovery/normal: `[28,42)`
-- second anomaly: `[42,56)`
-- final recovery/normal: `[56,70)`
+- normal: requests `[0,40)`
+- first anomaly: `[40,60)`
+- recovery/normal: `[60,90)`
+- second anomaly: `[90,100)`
+- final recovery/normal: `[100,120)`
 
 The first anomaly represents intensive diagnosis across the full informative `bpx` set. The second
-represents full-rate learned monitoring using only `bpx=10`.
-Because decisions occur between requests, the 14-ping diagnosis bursts intentionally spill into
-recovery after a two-request detection delay. This lets the plot show BW-diagnosis overhead
-continuing as the latency-ping anomaly signal falls back.
+represents learned diagnosis using only `bpx={10,11,12}`. Because decisions occur between requests,
+diagnosis starts after the latency detector fires instead of at the anomaly boundary.
 
 Build and run:
 
@@ -67,8 +65,8 @@ scripts/run.sh
 Useful overrides:
 
 ```bash
-N_REQUESTS=70 FIRST_ANOMALY_START=14 FIRST_ANOMALY_LENGTH=14 \
-  SECOND_ANOMALY_START=42 SECOND_ANOMALY_LENGTH=14 scripts/run.sh
+N_REQUESTS=120 FIRST_ANOMALY_START=40 FIRST_ANOMALY_LENGTH=20 \
+  SECOND_ANOMALY_START=90 SECOND_ANOMALY_LENGTH=10 scripts/run.sh
 ANOMALY_CALIBRATION_REQUESTS=30 scripts/run.sh
 ```
 

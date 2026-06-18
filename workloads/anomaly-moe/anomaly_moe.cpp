@@ -2,9 +2,9 @@
 //
 // Eight decode experts are explicitly mapped one-to-one onto the eight XCDs. Each expert streams
 // weight chunks home-identified to its corresponding HBM path. The request timeline keeps total
-// tokens fixed while twice routing 57/64 tokens to one expert. Always-on pointer-chase latency
-// pings detect each anomaly. The first diagnosis sweeps the informative bpx set twice; the second
-// diagnoses with bpx=10 at full rate.
+// tokens fixed while routing 40/64 tokens to one expert. Always-on pointer-chase latency
+// pings detect each anomaly. The first diagnosis sweeps the informative bpx set once; the second
+// diagnoses with bpx={10,11,12}.
 
 #include <hip/hip_cooperative_groups.h>
 #include <hip/hip_runtime.h>
@@ -37,6 +37,7 @@ static constexpr int BYTES_PER_THREAD_ITER = 4 * 16;
 static constexpr int GRID_SLOTS_PER_XCD =
     TARGET_CUS_PER_XCD + LATENCY_CUS_PER_XCD + MAX_BW_CUS_PER_XCD;
 static constexpr int INFORMATIVE_BPX_ORDER[INFORMATIVE_BPX_COUNT] = {10, 16, 11, 15, 12, 14, 13};
+static constexpr int SECOND_ANOMALY_BPX_ORDER[SECOND_ANOMALY_PING_COUNT] = {10, 11, 12};
 
 __device__ __forceinline__
 void stream_iteration(const uint64_t* const ptrs[4], size_t n_chunks,
@@ -294,8 +295,8 @@ struct Controller {
         diagnosis_step++;
         if (decision.active) {
             decision.bpx = encounter == 1
-                ? INFORMATIVE_BPX_ORDER[probe_index % INFORMATIVE_BPX_COUNT]
-                : SECOND_ANOMALY_BPX;
+                ? INFORMATIVE_BPX_ORDER[probe_index]
+                : SECOND_ANOMALY_BPX_ORDER[probe_index];
             probe_index++;
         }
         return decision;
@@ -559,14 +560,13 @@ int main(int argc, char** argv) {
     };
 
     printf("[anomaly-moe] requests=%d anomaly_1=[%d,%d) anomaly_2=[%d,%d) hot_expert=%d "
-           "balanced_tokens=%d hot_tokens=%d/%d "
+           "balanced_tokens=%d anomaly_tokens={40,4,4,4,3,3,3,3} "
            "latency_lines_per_path=%zu clock=%uMHz\n",
            n_requests, first_start, first_start + first_length,
            second_start, second_start + second_length, HOT_EXPERT,
-           BALANCED_TOKENS_PER_EXPERT, HOT_EXPERT_TOKENS, TOTAL_TOKENS,
-           usable_latency_len, clock_mhz);
-    printf("[bw_schedule] anomaly_1=order(10,16,11,15,12,14,13)x2 after trigger; "
-           "anomaly_2=bpx10 every 4th request after trigger\n");
+           BALANCED_TOKENS_PER_EXPERT, usable_latency_len, clock_mhz);
+    printf("[bw_schedule] anomaly_1=order(10,16,11,15,12,14,13)x1 after trigger; "
+           "anomaly_2=order(10,11,12)x1 after trigger\n");
     printf("[mapping] expert_i -> xcd_i -> hbm_i; home identification reuses moe/k1.h and moe/k2.h\n");
     fflush(stdout);
 
@@ -589,8 +589,8 @@ int main(int argc, char** argv) {
     }
 
     const vector<int> balanced_tokens(XCD_NUM, BALANCED_TOKENS_PER_EXPERT);
-    vector<int> hot_tokens(XCD_NUM, COLD_EXPERT_TOKENS);
-    hot_tokens[HOT_EXPERT] = HOT_EXPERT_TOKENS;
+    const vector<int> hot_tokens = {40, 4, 4, 4, 3, 3, 3, 3};
+    assert(HOT_EXPERT == 0);
     assert(accumulate(balanced_tokens.begin(), balanced_tokens.end(), 0) == TOTAL_TOKENS);
     assert(accumulate(hot_tokens.begin(), hot_tokens.end(), 0) == TOTAL_TOKENS);
 
