@@ -41,7 +41,8 @@ __global__ void initKernel(dtype *A, size_t N)
 
 template <int N, int iters, int BLOCKSIZE>
 __global__ void sumKernel(dtype *__restrict__ A, dtype **__restrict__ B1, dtype **__restrict__ B2,
-                          dtype **__restrict__ B3, dtype **__restrict__ B4, int zero)
+                          dtype **__restrict__ B3, dtype **__restrict__ B4, size_t B1_count,
+                          size_t B2_count, size_t B3_count, size_t B4_count, int zero)
 {
     // print (xcc_id,cu_id) of each block
     uint32_t cu_id, xcc_id, se_id;
@@ -54,30 +55,76 @@ __global__ void sumKernel(dtype *__restrict__ A, dtype **__restrict__ B1, dtype 
     dtype localSum = (dtype)0;
 
     dtype **B;
+    size_t B_count;
 
     if (InterCCHop == 0) {
-        if (cc_id == 0)         B = B1;
-        else if (cc_id == 1)    B = B2;
-        else if (cc_id == 2)    B = B3;
-        else                    B = B4;
+        if (cc_id == 0) {
+            B = B1;
+            B_count = B1_count;
+        } else if (cc_id == 1) {
+            B = B2;
+            B_count = B2_count;
+        } else if (cc_id == 2) {
+            B = B3;
+            B_count = B3_count;
+        } else {
+            B = B4;
+            B_count = B4_count;
+        }
     } else if (InterCCHop == 1) {
-        if (cc_id == 0)         B = B2;
-        else if (cc_id == 1)    B = B3;
-        else if (cc_id == 2)    B = B4;
-        else                    B = B1;
+        if (cc_id == 0) {
+            B = B2;
+            B_count = B2_count;
+        } else if (cc_id == 1) {
+            B = B3;
+            B_count = B3_count;
+        } else if (cc_id == 2) {
+            B = B4;
+            B_count = B4_count;
+        } else {
+            B = B1;
+            B_count = B1_count;
+        }
     } else if (InterCCHop == 2) {
-        if (cc_id == 0)         B = B3;
-        else if (cc_id == 1)    B = B4;
-        else if (cc_id == 2)    B = B1;
-        else                    B = B2;
+        if (cc_id == 0) {
+            B = B3;
+            B_count = B3_count;
+        } else if (cc_id == 1) {
+            B = B4;
+            B_count = B4_count;
+        } else if (cc_id == 2) {
+            B = B1;
+            B_count = B1_count;
+        } else {
+            B = B2;
+            B_count = B2_count;
+        }
     } else if (InterCCHop == 3) {
-        if (cc_id == 0)         B = B4;
-        else if (cc_id == 1)    B = B1;
-        else if (cc_id == 2)    B = B2;
-        else                    B = B3;
+        if (cc_id == 0) {
+            B = B4;
+            B_count = B4_count;
+        } else if (cc_id == 1) {
+            B = B1;
+            B_count = B1_count;
+        } else if (cc_id == 2) {
+            B = B2;
+            B_count = B2_count;
+        } else {
+            B = B3;
+            B_count = B3_count;
+        }
     }
 
-    B += threadIdx.x;
+    const size_t window_width = 2 * (size_t)N;
+    const size_t window_count = B_count > window_width ? B_count - window_width + 1 : 1;
+    size_t block_stride = (window_count + (size_t)gridDim.x - 1) / (size_t)gridDim.x;
+    if (block_stride < (size_t)BLOCKSIZE)
+        block_stride = (size_t)BLOCKSIZE;
+    if (block_stride > window_count)
+        block_stride = window_count;
+
+    const size_t block_offset = ((size_t)blockIdx.x * block_stride) % window_count;
+    B += block_offset + threadIdx.x;
 
 #pragma unroll N / BLOCKSIZE> 32   ? 1 : 32 / (N / BLOCKSIZE)
     for (int iter = 0; iter < iters; iter++)
@@ -97,10 +144,12 @@ __global__ void sumKernel(dtype *__restrict__ A, dtype **__restrict__ B1, dtype 
 }
 
 template <int N, int iters, int blockSize>
-double callKernel(int blockCount)
+double callKernel(int blockCount, size_t B1_count, size_t B2_count, size_t B3_count, size_t B4_count)
 {
     // sumKernel<N, iters, blockSize><<<blockCount, blockSize>>>(dA, dB, 0);
-    sumKernel<N, iters, blockSize><<<blockCount, blockSize>>>(dA, dB1, dB2, dB3, dB4, 0);
+    sumKernel<N, iters, blockSize><<<blockCount, blockSize>>>(dA, dB1, dB2, dB3, dB4,
+                                                              B1_count, B2_count, B3_count,
+                                                              B4_count, 0);
     return 0.0;
 }
 
@@ -208,8 +257,9 @@ void measure()
 
         // this is where the trouble is.
 
-        if (cc_dtypes[0].size() < 2*N || cc_dtypes[1].size() < 2*N ||
-            cc_dtypes[2].size() < 2*N || cc_dtypes[3].size() < 2*N) {
+        const size_t required_dtypes = 2 * (size_t)N + (size_t)i;
+        if (cc_dtypes[0].size() < required_dtypes || cc_dtypes[1].size() < required_dtypes ||
+            cc_dtypes[2].size() < required_dtypes || cc_dtypes[3].size() < required_dtypes) {
             // printf("(N: %d, i: %d) Not enough dtypes in one of the CCs. Skipping this iteration.\n", N, i);
             GPU_ERROR(hipFree(dA));
             GPU_ERROR(hipFree(dbuf));
@@ -247,8 +297,13 @@ void measure()
         dB3 += i;
         dB4 += i;
 
+        const size_t B1_count = cc_dtypes[0].size() - (size_t)i;
+        const size_t B2_count = cc_dtypes[1].size() - (size_t)i;
+        const size_t B3_count = cc_dtypes[2].size() - (size_t)i;
+        const size_t B4_count = cc_dtypes[3].size() - (size_t)i;
+
         GPU_ERROR(hipEventRecord(start));
-        callKernel<N, iters, blockSize>(blockCount);
+        callKernel<N, iters, blockSize>(blockCount, B1_count, B2_count, B3_count, B4_count);
         GPU_ERROR(hipEventRecord(stop));
 
         GPU_ERROR(hipEventSynchronize(stop));
@@ -257,13 +312,13 @@ void measure()
         time.add(milliseconds / 1000);
 
         /*    measureDRAMBytesStart();
-            callKernel<N, iters, blockSize>(blockCount);
+            callKernel<N, iters, blockSize>(blockCount, B1_count, B2_count, B3_count, B4_count);
             auto metrics = measureDRAMBytesStop();
             dram_read.add(metrics[0]);
             dram_write.add(metrics[1]);
 
             measureL2BytesStart();
-            callKernel<N, iters, blockSize>(blockCount);
+            callKernel<N, iters, blockSize>(blockCount, B1_count, B2_count, B3_count, B4_count);
             metrics = measureL2BytesStop();
             L2_read.add(metrics[0]);
             L2_write.add(metrics[1]);

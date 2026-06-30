@@ -1,1 +1,29 @@
-variants for sigcomm revision
+The MI350 HBM bandwidth numbers were inflated because every block assigned to the same target CC read the same pointer stream.
+
+In the kernel, the pointer table was selected by CC/hop, then offset only by threadIdx.x:
+
+B += threadIdx.x;
+
+There was no blockIdx.x component. So many blocks in the same CC repeatedly touched the same B[i] / B[i + N] entries and payload addresses. On MI350, with only 2 CCs, this created strong cache/fabric reuse while the bandwidth formula still multiplied by total blockCount, as if every block generated independent HBM traffic. That is why hop0 could report impossible values like ~11.5 TB/s, above the 8.0 TB/s theoretical HBM bandwidth.
+
+I fixed it by passing each CC pointer-table length into the kernel and adding a valid per-
+block offset:
+
+const size_t window_width = 2 * (size_t)N;
+const size_t window_count = B_count > window_width ? B_count - window_width + 1 : 1;
+size_t block_stride = (window_count + (size_t)gridDim.x - 1) / (size_t)gridDim.x;
+...
+const size_t block_offset = ((size_t)blockIdx.x * block_stride) % window_count;
+B += block_offset + threadIdx.x;
+
+I also adjusted the host-side bounds checks to account for the existing dB* += i shift, so the B + N stream stays in bounds.
+
+MI300 had the same missing block offset. I patched MI300 the same way. It likely looked less obviously broken because MI300 has 4 CCs, spreading the shared streams across more CCs, while MI350 has 2 CCs and exposed the reuse much more strongly.
+
+Validation on MI350 HBM-49:
+
+old hop0: 11541.0 GB/s, 55.2% spread
+new hop0:  3936.5 GB/s,  4.4% spread
+
+old hop1:  3458.2 GB/s, 16.9% spread
+new hop1:  2719.4 GB/s,  0.0% spread

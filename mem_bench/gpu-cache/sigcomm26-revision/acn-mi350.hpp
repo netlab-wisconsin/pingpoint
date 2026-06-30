@@ -16,6 +16,10 @@ namespace cg = cooperative_groups;
 #define CC_NUM 2
 #endif
 
+#define L2_SIZE    (4 * 1024 * 1024)   // 4 MB per XCD
+#define LLC_SIZE   (256 * 1024 * 1024) // 256 MB total LLC
+#define CHUNK_SIZE (8 * 1024)          // MI350 IOD/CC interleaving granularity (8 KB)
+
 #define DEBUG 0
 
 #define USE_GLOBAL_BARRIER 0

@@ -43,7 +43,8 @@ __global__ void initKernel(dtype *A, size_t N)
 
 template <int N, int iters, int BLOCKSIZE>
 __global__ void sumKernel(dtype *__restrict__ A, dtype **__restrict__ B1, dtype **__restrict__ B2,
-                          dtype **__restrict__ B3, dtype **__restrict__ B4, int zero)
+                          dtype **__restrict__ B3, dtype **__restrict__ B4, size_t B1_count,
+                          size_t B2_count, size_t B3_count, size_t B4_count, int zero)
 {
     // print (xcc_id,cu_id) of each block
     uint32_t cu_id, xcc_id, se_id;
@@ -58,12 +59,31 @@ __global__ void sumKernel(dtype *__restrict__ A, dtype **__restrict__ B1, dtype 
     dtype **B;
     const uint32_t hop = ((InterCCHop % CC_NUM) + CC_NUM) % CC_NUM;
     const uint32_t target_cc = (cc_id + hop) % CC_NUM;
-    if (target_cc == 0)         B = B1;
-    else if (target_cc == 1)    B = B2;
-    else if (target_cc == 2)    B = B3;
-    else                        B = B4;
+    size_t B_count;
+    if (target_cc == 0) {
+        B = B1;
+        B_count = B1_count;
+    } else if (target_cc == 1) {
+        B = B2;
+        B_count = B2_count;
+    } else if (target_cc == 2) {
+        B = B3;
+        B_count = B3_count;
+    } else {
+        B = B4;
+        B_count = B4_count;
+    }
 
-    B += threadIdx.x;
+    const size_t window_width = 2 * (size_t)N;
+    const size_t window_count = B_count > window_width ? B_count - window_width + 1 : 1;
+    size_t block_stride = (window_count + (size_t)gridDim.x - 1) / (size_t)gridDim.x;
+    if (block_stride < (size_t)BLOCKSIZE)
+        block_stride = (size_t)BLOCKSIZE;
+    if (block_stride > window_count)
+        block_stride = window_count;
+
+    const size_t block_offset = ((size_t)blockIdx.x * block_stride) % window_count;
+    B += block_offset + threadIdx.x;
 
 #pragma unroll N / BLOCKSIZE> 32   ? 1 : 32 / (N / BLOCKSIZE)
     for (int iter = 0; iter < iters; iter++)
@@ -83,10 +103,12 @@ __global__ void sumKernel(dtype *__restrict__ A, dtype **__restrict__ B1, dtype 
 }
 
 template <int N, int iters, int blockSize>
-double callKernel(int blockCount)
+double callKernel(int blockCount, size_t B1_count, size_t B2_count, size_t B3_count, size_t B4_count)
 {
     // sumKernel<N, iters, blockSize><<<blockCount, blockSize>>>(dA, dB, 0);
-    sumKernel<N, iters, blockSize><<<blockCount, blockSize>>>(dA, dB1, dB2, dB3, dB4, 0);
+    sumKernel<N, iters, blockSize><<<blockCount, blockSize>>>(dA, dB1, dB2, dB3, dB4,
+                                                              B1_count, B2_count, B3_count,
+                                                              B4_count, 0);
     return 0.0;
 }
 
@@ -121,13 +143,14 @@ void measure()
     
     // June note (06/05/26) Setting i to large for large N incurs long time
     // During SIGCOMM'26 revision, only used i < 3 for LLC and HBM range in mi350x measurement.
-    for (int i = 0; i < 15; i++)
+    for (int i = 0; i < 2; i++)
     {
         const size_t bufferCount = 2 * N + i * 1282;
         GPU_ERROR(hipMalloc(&dA, bufferCount * sizeof(dtype)));
         initKernel<<<52, 256>>>(dA, bufferCount);
 
-        const size_t multiplicative_factor = CC_NUM * 16;
+        // const size_t multiplicative_factor = CC_NUM * 16;
+        const size_t multiplicative_factor = CC_NUM * 2;
         const size_t n_dtype_dbuf = bufferCount * multiplicative_factor;
         GPU_ERROR(hipMalloc(&dbuf, n_dtype_dbuf * sizeof(dtype)));
         initKernel<<<52, 256>>>(dbuf, n_dtype_dbuf);
@@ -206,12 +229,18 @@ void measure()
         // this is where the trouble is.
 
         bool enough_dtypes = true;
+        const size_t required_dtypes = 2 * (size_t)N + (size_t)i;
         for (int cc = 0; cc < CC_NUM; ++cc) {
-            if (cc_dtypes[cc].size() < 2 * N) {
+            if (cc_dtypes[cc].size() < required_dtypes) {
                 enough_dtypes = false;
                 break;
             }
         }
+
+        // ensure each CC has >= 2*L2_SIZE data to thrash L2
+        const size_t min_dtypes_per_cc = (2 * L2_SIZE) / sizeof(dtype);
+        for (int cc = 0; cc < CC_NUM; cc++)
+            assert(cc_dtypes[cc].size() >= min_dtypes_per_cc);
         if (!enough_dtypes) {
             GPU_ERROR(hipFree(dA));
             GPU_ERROR(hipFree(dbuf));
@@ -255,8 +284,13 @@ void measure()
         dB3 += i;
         dB4 += i;
 
+        const size_t B1_count = cc_dtypes[0].size() - (size_t)i;
+        const size_t B2_count = cc_dtypes[1].size() - (size_t)i;
+        const size_t B3_count = CC_NUM > 2 ? cc_dtypes[2].size() - (size_t)i : B1_count;
+        const size_t B4_count = CC_NUM > 3 ? cc_dtypes[3].size() - (size_t)i : B2_count;
+
         GPU_ERROR(hipEventRecord(start));
-        callKernel<N, iters, blockSize>(blockCount);
+        callKernel<N, iters, blockSize>(blockCount, B1_count, B2_count, B3_count, B4_count);
         GPU_ERROR(hipEventRecord(stop));
 
         GPU_ERROR(hipEventSynchronize(stop));
@@ -265,13 +299,13 @@ void measure()
         time.add(milliseconds / 1000);
 
         /*    measureDRAMBytesStart();
-            callKernel<N, iters, blockSize>(blockCount);
+            callKernel<N, iters, blockSize>(blockCount, B1_count, B2_count, B3_count, B4_count);
             auto metrics = measureDRAMBytesStop();
             dram_read.add(metrics[0]);
             dram_write.add(metrics[1]);
 
             measureL2BytesStart();
-            callKernel<N, iters, blockSize>(blockCount);
+            callKernel<N, iters, blockSize>(blockCount, B1_count, B2_count, B3_count, B4_count);
             metrics = measureL2BytesStop();
             L2_read.add(metrics[0]);
             L2_write.add(metrics[1]);
@@ -286,9 +320,9 @@ void measure()
     }
     double blockDV = 2 * N * sizeof(dtype);
 
-#if 1 // for logging the latency of each load. Only used for L1 range. 06/02/2026.
+#if 0 // for logging the latency of each load. Only used for L1 range. 06/02/2026.
     double bw = blockDV * blockCount * iters / time.minValue() / 1.0e9;
-    double gpu_clock_hz = prop.clockRate * 1000.0; // clockRate is in kHz
+    double gpu_clock_hz = 2200.0 * 1e6; // MI350: hardcoded 2200 MHz (prop.clockRate unreliable on MI350 nodes)
     double loads_per_thread = (double)iters * (N / blockSize) * 2;
     double avg_latency_cycles = (time.minValue() * gpu_clock_hz) / loads_per_thread;
     cout << fixed << setprecision(0) << setw(10) << blockDV / 1024 << " kB" //
